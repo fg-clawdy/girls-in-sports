@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 
@@ -37,6 +37,8 @@ export default function ResultDetailPage() {
   const [musicStatus, setMusicStatus] = useState("");
   const [generatedMusicPath, setGeneratedMusicPath] = useState("");
   const [mixingMusic, setMixingMusic] = useState(false);
+  const [musicIntent, setMusicIntent] = useState("");
+  const [showMusicIntent, setShowMusicIntent] = useState(true);
 
   useEffect(() => {
     fetch(`/api/results/${id}`)
@@ -94,11 +96,12 @@ export default function ResultDetailPage() {
       .catch(() => {});
   }, []);
 
-  // Auto-generate music prompt when asset loads
-  useEffect(() => {
-    if (asset && isVideo) {
-      const type = asset.outputType === "HIGHLIGHT_VIDEO_15S" ? "highlight" : "wrapup";
-      fetch("/api/music/prompt", {
+  // Auto-generate music prompt when asset loads or intent changes
+  const generateMusicPrompt = useCallback(async (intent?: string) => {
+    if (!asset || !isVideo) return;
+    const type = asset.outputType === "HIGHLIGHT_VIDEO_15S" ? "highlight" : "wrapup";
+    try {
+      const res = await fetch("/api/music/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -106,15 +109,24 @@ export default function ResultDetailPage() {
           sport: asset.event.sport,
           compositionType: type,
           targetTempo: musicTempo,
+          userIntent: intent,
         }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.success) setMusicPrompt(data.prompt);
-        })
-        .catch(() => {});
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMusicPrompt(data.prompt);
+        setShowMusicIntent(false);
+      }
+    } catch {
+      // ignore
     }
-  }, [asset, musicTempo]);
+  }, [asset, musicTempo, isVideo]);
+
+  useEffect(() => {
+    if (asset && isVideo && !musicPrompt) {
+      generateMusicPrompt();
+    }
+  }, [asset, isVideo, musicPrompt, generateMusicPrompt]);
 
   const handleGenerateMusic = async () => {
     setMusicLoading(true);
@@ -313,113 +325,158 @@ export default function ResultDetailPage() {
                 </h2>
 
                 <div className="space-y-4">
-                  {/* Tempo selection */}
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-700 mb-2">
-                      Mood / Tempo
-                    </label>
-                    <div className="flex gap-2">
-                      {(["upbeat", "calm", "dramatic"] as const).map((t) => (
+                  {/* Step 1: Intent */}
+                  {showMusicIntent && (
+                    <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4">
+                      <label className="block text-sm font-medium text-zinc-700 mb-2">
+                        Describe the music you want
+                        <span className="text-zinc-400 font-normal ml-1">(optional — AI will suggest a prompt)</span>
+                      </label>
+                      <textarea
+                        value={musicIntent}
+                        onChange={(e) => setMusicIntent(e.target.value)}
+                        rows={3}
+                        className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
+                        placeholder={`Examples:\n• "Upbeat electronic pop with driving drums"\n• "Inspiring cinematic orchestral, building to a climax"\n• "Chill lo-fi hip hop, no vocals"`}
+                      />
+                      <div className="flex gap-2 mt-3">
                         <button
-                          key={t}
-                          onClick={() => setMusicTempo(t)}
-                          className={`px-3 py-1.5 rounded-lg text-sm font-medium capitalize transition-colors ${
-                            musicTempo === t
-                              ? "bg-[var(--accent)] text-white"
-                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                          }`}
+                          onClick={() => generateMusicPrompt(musicIntent.trim() || undefined)}
+                          className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)]"
                         >
-                          {t}
+                          Generate Music Prompt
                         </button>
-                      ))}
+                        <button
+                          onClick={() => {
+                            setShowMusicIntent(false);
+                          }}
+                          className="px-4 py-2 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
+                        >
+                          Skip — Use Default
+                        </button>
+                      </div>
                     </div>
-                  </div>
-
-                  {/* Model selection */}
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-700 mb-2">
-                      AI Music Model
-                    </label>
-                    <select
-                      value={selectedMusicModel}
-                      onChange={(e) => setSelectedMusicModel(e.target.value)}
-                      className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent"
-                    >
-                      {musicModels.length === 0 && (
-                        <option value="minimax-music-v2">minimax-music-v2 ($0.04)</option>
-                      )}
-                      {musicModels.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name} — ${m.pricingUsd}{m.supportsInstrumental ? ", instrumental" : ", with vocals"}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Prompt editor */}
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-700 mb-2">
-                      Music Prompt
-                      <span className="text-zinc-400 font-normal ml-1">
-                        (edit to refine the sound)
-                      </span>
-                    </label>
-                    <textarea
-                      value={musicPrompt}
-                      onChange={(e) => setMusicPrompt(e.target.value)}
-                      rows={4}
-                      className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
-                      placeholder="Describe the background music you want..."
-                    />
-                  </div>
-
-                  {/* Generate button */}
-                  <div className="flex flex-wrap gap-3 items-center">
-                    <button
-                      onClick={handleGenerateMusic}
-                      disabled={musicLoading || !musicPrompt.trim()}
-                      className="px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {musicLoading ? "Generating..." : `Generate Music (${getModelPrice()})`}
-                    </button>
-
-                    {generatedMusicPath && (
-                      <button
-                        onClick={handleMixMusic}
-                        disabled={mixingMusic}
-                        className="px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        {mixingMusic ? "Mixing..." : "Add to Video"}
-                      </button>
-                    )}
-                  </div>
-
-                  {musicStatus && (
-                    <p
-                      className={`text-sm ${
-                        musicStatus.includes("Failed") || musicStatus.includes("failed")
-                          ? "text-red-600"
-                          : musicStatus.includes("Mix")
-                          ? "text-amber-600"
-                          : "text-green-600"
-                      }`}
-                    >
-                      {musicStatus}
-                    </p>
                   )}
 
-                  {/* Preview generated music */}
-                  {generatedMusicPath && !musicLoading && (
-                    <div className="mt-3">
-                      <p className="text-sm text-zinc-600 mb-2">Preview:</p>
-                      <audio
-                        controls
-                        className="w-full"
-                        src={`/api/music/download?path=${encodeURIComponent(generatedMusicPath)}`}
-                      >
-                        Your browser does not support the audio tag.
-                      </audio>
-                    </div>
+                  {!showMusicIntent && (
+                    <>
+                      {/* Tempo selection */}
+                      <div>
+                        <label className="block text-sm font-medium text-zinc-700 mb-2">
+                          Mood / Tempo
+                        </label>
+                        <div className="flex gap-2">
+                          {(["upbeat", "calm", "dramatic"] as const).map((t) => (
+                            <button
+                              key={t}
+                              onClick={() => setMusicTempo(t)}
+                              className={`px-3 py-1.5 rounded-lg text-sm font-medium capitalize transition-colors ${
+                                musicTempo === t
+                                  ? "bg-[var(--accent)] text-white"
+                                  : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                              }`}
+                            >
+                              {t}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Model selection */}
+                      <div>
+                        <label className="block text-sm font-medium text-zinc-700 mb-2">
+                          AI Music Model
+                        </label>
+                        <select
+                          value={selectedMusicModel}
+                          onChange={(e) => setSelectedMusicModel(e.target.value)}
+                          className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent"
+                        >
+                          {musicModels.length === 0 && (
+                            <option value="minimax-music-v2">minimax-music-v2 ($0.04)</option>
+                          )}
+                          {musicModels.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.name} — ${m.pricingUsd}{m.supportsInstrumental ? ", instrumental" : ", with vocals"}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Prompt editor */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="block text-sm font-medium text-zinc-700">
+                            Music Prompt
+                          </label>
+                          <button
+                            onClick={() => {
+                              setShowMusicIntent(true);
+                              setMusicIntent("");
+                            }}
+                            className="text-xs text-[var(--accent)] hover:underline"
+                          >
+                            Refine from intent
+                          </button>
+                        </div>
+                        <textarea
+                          value={musicPrompt}
+                          onChange={(e) => setMusicPrompt(e.target.value)}
+                          rows={4}
+                          className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
+                          placeholder="Describe the background music you want..."
+                        />
+                      </div>
+
+                      {/* Generate button */}
+                      <div className="flex flex-wrap gap-3 items-center">
+                        <button
+                          onClick={handleGenerateMusic}
+                          disabled={musicLoading || !musicPrompt.trim()}
+                          className="px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {musicLoading ? "Generating..." : `Generate Music (${getModelPrice()})`}
+                        </button>
+
+                        {generatedMusicPath && (
+                          <button
+                            onClick={handleMixMusic}
+                            disabled={mixingMusic}
+                            className="px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            {mixingMusic ? "Mixing..." : "Add to Video"}
+                          </button>
+                        )}
+                      </div>
+
+                      {musicStatus && (
+                        <p
+                          className={`text-sm ${
+                            musicStatus.includes("Failed") || musicStatus.includes("failed")
+                              ? "text-red-600"
+                              : musicStatus.includes("Mix")
+                              ? "text-amber-600"
+                              : "text-green-600"
+                          }`}
+                        >
+                          {musicStatus}
+                        </p>
+                      )}
+
+                      {/* Preview generated music */}
+                      {generatedMusicPath && !musicLoading && (
+                        <div className="mt-3">
+                          <p className="text-sm text-zinc-600 mb-2">Preview:</p>
+                          <audio
+                            controls
+                            className="w-full"
+                            src={`/api/music/download?path=${encodeURIComponent(generatedMusicPath)}`}
+                          >
+                            Your browser does not support the audio tag.
+                          </audio>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>

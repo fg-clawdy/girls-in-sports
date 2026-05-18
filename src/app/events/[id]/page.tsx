@@ -66,6 +66,9 @@ export default function EventPage() {
   const [compositionScript, setCompositionScript] = useState<any>(null);
   const [compositionLoading, setCompositionLoading] = useState(false);
   const [showScriptPanel, setShowScriptPanel] = useState(false);
+  const [showIntentPanel, setShowIntentPanel] = useState(false);
+  const [userIntent, setUserIntent] = useState("");
+  const [scriptJsonText, setScriptJsonText] = useState("");
   const [feedbackMap, setFeedbackMap] = useState<Record<string, "POSITIVE" | "NEGATIVE">>({});
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
@@ -639,9 +642,56 @@ export default function EventPage() {
               </button>
               <button
                 disabled={!outputType}
+                onClick={() => {
+                  setShowOutputPanel(false);
+                  setShowIntentPanel(true);
+                }}
+                className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* User Intent Panel */}
+      {showIntentPanel && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setShowIntentPanel(false)}
+          />
+          <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-lg p-6">
+            <h2 className="text-lg font-semibold text-zinc-900 mb-1">Describe Your Vision</h2>
+            <p className="text-sm text-zinc-500 mb-5">
+              Tell the AI Director what you want. Keep it simple — the AI will translate this into a precise production script.
+            </p>
+
+            <div className="mb-5">
+              <textarea
+                value={userIntent}
+                onChange={(e) => setUserIntent(e.target.value)}
+                rows={4}
+                className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
+                placeholder={`Examples:\n• "An upbeat highlight reel showing every goal and celebration"\n• "A calm, inspiring wrap-up with slow transitions and no text"\n• "High energy montage with quick cuts for social media"`}
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowIntentPanel(false);
+                  setShowOutputPanel(true);
+                }}
+                className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
+              >
+                Back
+              </button>
+              <button
                 onClick={async () => {
                   setCompositionLoading(true);
-                  setShowOutputPanel(false);
+                  setShowIntentPanel(false);
                   setShowScriptPanel(true);
 
                   const selectedAssets = filteredAssets.filter((a) => selectedIds.has(a.id));
@@ -666,24 +716,28 @@ export default function EventPage() {
                           aiReasons: ranking?.scores?.find((s) => s.assetId === a.id)?.reasons,
                         })),
                         outputType,
+                        userIntent: userIntent.trim() || undefined,
                       }),
                     });
 
                     const data = await res.json();
                     if (data.success) {
                       setCompositionScript(data.script);
+                      setScriptJsonText(JSON.stringify(data.script, null, 2));
                     } else {
                       setCompositionScript({ type: "error", message: data.error });
+                      setScriptJsonText("");
                     }
                   } catch {
                     setCompositionScript({ type: "error", message: "Failed to generate composition" });
+                    setScriptJsonText("");
                   } finally {
                     setCompositionLoading(false);
                   }
                 }}
                 className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {compositionLoading ? "Generating..." : "Start Composition"}
+                {compositionLoading ? "Generating..." : userIntent.trim() ? "Generate with Intent" : "Generate (Auto)"}
               </button>
             </div>
           </div>
@@ -699,7 +753,7 @@ export default function EventPage() {
           />
           <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-2xl max-h-[85vh] overflow-y-auto p-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-zinc-900">Composition Script</h2>
+              <h2 className="text-lg font-semibold text-zinc-900">Review & Edit Composition Script</h2>
               {compositionLoading && (
                 <span className="text-sm text-zinc-500 animate-pulse">Generating...</span>
               )}
@@ -708,8 +762,8 @@ export default function EventPage() {
             {compositionLoading && !compositionScript && (
               <div className="text-center py-8">
                 <div className="w-8 h-8 border-2 border-zinc-200 border-t-[var(--accent)] rounded-full animate-spin mx-auto mb-3" />
-                <p className="text-sm text-zinc-500">AI is planning your composition...</p>
-                <p className="text-xs text-zinc-400 mt-1">Layout, order, captions, and transitions</p>
+                <p className="text-sm text-zinc-500">AI Director is planning your composition...</p>
+                <p className="text-xs text-zinc-400 mt-1">Based on your intent: layout, order, captions, and transitions</p>
               </div>
             )}
 
@@ -722,6 +776,7 @@ export default function EventPage() {
 
             {!compositionLoading && compositionScript && compositionScript.type !== "error" && (
               <>
+                {/* Human-readable summary */}
                 <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4 mb-4">
                   <h3 className="font-semibold text-zinc-900 mb-2">
                     {compositionScript.title || "Untitled Composition"}
@@ -767,23 +822,49 @@ export default function EventPage() {
                   )}
                 </div>
 
+                {/* Editable JSON */}
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-zinc-700 mb-2">
+                    Edit Script JSON
+                    <span className="text-zinc-400 font-normal ml-1">(advanced — changes take effect on execution)</span>
+                  </label>
+                  <textarea
+                    value={scriptJsonText}
+                    onChange={(e) => setScriptJsonText(e.target.value)}
+                    rows={12}
+                    className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-xs font-mono bg-zinc-50 focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
+                    spellCheck={false}
+                  />
+                </div>
+
                 <div className="flex gap-3 mb-4">
                   <button
                     onClick={() => setShowScriptPanel(false)}
                     className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
                   >
-                    Close
+                    Cancel
                   </button>
                   <button
                     disabled={compositionLoading}
                     onClick={async () => {
+                      // Parse the edited JSON
+                      let scriptToExecute = compositionScript;
+                      try {
+                        if (scriptJsonText.trim()) {
+                          scriptToExecute = JSON.parse(scriptJsonText);
+                        }
+                      } catch (err) {
+                        alert("Invalid JSON in script editor. Please fix before executing.");
+                        return;
+                      }
+
                       setCompositionLoading(true);
                       try {
                         const res = await fetch("/api/composition/execute", {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
-                            script: compositionScript,
+                            script: scriptToExecute,
                             eventId: id,
                           }),
                         });
@@ -805,15 +886,6 @@ export default function EventPage() {
                   >
                     {compositionLoading ? "Processing..." : "Execute Composition"}
                   </button>
-                </div>
-
-                <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4 mb-4 overflow-x-auto">
-                  <p className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wide">
-                    Raw Script JSON
-                  </p>
-                  <pre className="text-xs text-zinc-700 whitespace-pre-wrap">
-                    {JSON.stringify(compositionScript, null, 2)}
-                  </pre>
                 </div>
               </>
             )}

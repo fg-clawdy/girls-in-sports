@@ -97,7 +97,15 @@ export interface CompositionInput {
     aiReasons?: string[];
   }>;
   outputType: "collage" | "highlight" | "wrapup";
+  userIntent?: string; // NEW: free-text intent from the user
 }
+
+import {
+  buildVideoDirectorUserPrompt,
+  buildCollageDirectorUserPrompt,
+  VIDEO_DIRECTOR_SYSTEM_PROMPT,
+  COLLAGE_DIRECTOR_SYSTEM_PROMPT,
+} from "@/lib/prompt-engineer";
 
 const SYSTEM_PROMPT = `You are the Creative Director for Girls In Sports (GIS), a youth sports camp and coaching clinic brand.
 
@@ -117,7 +125,7 @@ COLLAGE: {type:"collage", title:string, subtitle:string, layout:"grid"|"featured
 
 VIDEO: {type:"highlight"|"wrapup", title:string, subtitle:string, totalDuration:number, clips:[{assetId, startTime, duration, transition:"cut"|"fade"|"dissolve"|"slide", transitionDuration, textOverlay?:{text, position:"top"|"bottom"|"center", startAt, duration}, zoom?:"in"|"out"|"none", speed?:number}], musicTempo:"upbeat"|"calm"|"dramatic"|"none", brandedOutro:{text, duration, backgroundColor, textColor}, resolution:"1080p"|"720p"|"4K"}`;
 
-function buildUserPrompt(input: CompositionInput): string {
+function buildLegacyUserPrompt(input: CompositionInput): string {
   const { event, assets, outputType } = input;
 
   const assetList = assets
@@ -147,6 +155,39 @@ ${assetList}
 Write the composition script.`;
 }
 
+function buildIntentUserPrompt(input: CompositionInput): string {
+  const intent = input.userIntent?.trim() || "Create an engaging composition that showcases the event";
+  const { event, assets, outputType } = input;
+
+  if (outputType === "collage") {
+    return buildCollageDirectorUserPrompt({
+      userIntent: intent,
+      event,
+      assets,
+    });
+  }
+
+  return buildVideoDirectorUserPrompt({
+    userIntent: intent,
+    compositionType: outputType as "highlight" | "wrapup",
+    event,
+    assets,
+  });
+}
+
+function getSystemPrompt(input: CompositionInput): string {
+  if (input.userIntent) {
+    return input.outputType === "collage"
+      ? COLLAGE_DIRECTOR_SYSTEM_PROMPT
+      : VIDEO_DIRECTOR_SYSTEM_PROMPT;
+  }
+  return SYSTEM_PROMPT;
+}
+
+function buildUserPrompt(input: CompositionInput): string {
+  return input.userIntent ? buildIntentUserPrompt(input) : buildLegacyUserPrompt(input);
+}
+
 async function callCompositionLLM(
   config: CompositionConfig,
   input: CompositionInput
@@ -154,7 +195,7 @@ async function callCompositionLLM(
   const payload = {
     model: config.model,
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: getSystemPrompt(input) },
       { role: "user", content: buildUserPrompt(input) },
     ],
     max_tokens: 4000,

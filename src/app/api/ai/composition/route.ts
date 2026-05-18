@@ -5,7 +5,7 @@ import type { CompositionInput } from "@/lib/composer";
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { event, assets, outputType } = body;
+    const { event, assets, outputType, userIntent } = body;
 
     if (!event || !Array.isArray(assets) || !outputType) {
       return NextResponse.json(
@@ -24,6 +24,7 @@ export async function POST(request: Request) {
         aiReasons: Array.isArray(a.aiReasons) ? a.aiReasons.map(String) : undefined,
       })),
       outputType,
+      userIntent: userIntent || undefined,
     };
 
     const { script, modelUsed } = await generateCompositionScript(input);

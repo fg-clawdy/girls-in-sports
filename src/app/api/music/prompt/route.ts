@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
-import { generateMusicPromptFromVideo } from "@/lib/music-generation";
+import {
+  generateMusicPromptFromVideo,
+  refineMusicPromptWithLLM,
+} from "@/lib/music-generation";
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { eventName, sport, compositionType, targetTempo } = body;
+    const { eventName, sport, compositionType, targetTempo, userIntent } = body;
 
     if (!eventName || !sport) {
       return NextResponse.json(
@@ -13,6 +16,19 @@ export async function POST(request: Request) {
       );
     }
 
+    // If user provided intent, use LLM to refine the prompt with prompt-engineer template
+    if (userIntent?.trim()) {
+      const refined = await refineMusicPromptWithLLM({
+        userIntent: userIntent.trim(),
+        eventName,
+        sport,
+        compositionType: compositionType || "wrapup",
+        targetTempo: targetTempo || "upbeat",
+      });
+      return NextResponse.json({ success: true, prompt: refined });
+    }
+
+    // Otherwise use the simple auto-generated prompt
     const prompt = await generateMusicPromptFromVideo(
       eventName,
       sport,

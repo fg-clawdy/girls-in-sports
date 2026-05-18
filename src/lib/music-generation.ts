@@ -169,6 +169,94 @@ export async function pollForMusic(
   throw new Error("Music generation timed out after polling");
 }
 
+// Music Prompt Engineer — refine user intent into production-grade music prompt
+// Uses the same LLM as composition generation (Venice API)
+
+import {
+  MUSIC_PROMPT_SYSTEM_PROMPT,
+  buildMusicPromptUserPrompt,
+} from "./prompt-engineer";
+
+export interface MusicRefineInput {
+  userIntent: string;
+  eventName: string;
+  sport: string;
+  compositionType: "highlight" | "wrapup";
+  targetTempo?: "upbeat" | "calm" | "dramatic";
+}
+
+export async function refineMusicPromptWithLLM(
+  input: MusicRefineInput
+): Promise<string> {
+  const config = getConfig();
+  const prompt = buildMusicPromptUserPrompt({
+    userIntent: input.userIntent,
+    eventName: input.eventName,
+    sport: input.sport,
+    compositionType: input.compositionType,
+    videoDuration: undefined,
+    targetTempo: input.targetTempo || "upbeat",
+  });
+
+  const payload = {
+    model: config.model,
+    messages: [
+      { role: "system", content: MUSIC_PROMPT_SYSTEM_PROMPT },
+      { role: "user", content: prompt },
+    ],
+    max_tokens: 2000,
+    temperature: 0.5,
+  };
+
+  const res = await fetch(`${config.apiUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Music prompt refinement error: ${res.status} ${text}`);
+  }
+
+  const data = await res.json();
+  const rawContent: string = data.choices?.[0]?.message?.content || "";
+
+  // Extract JSON
+  let jsonStr = rawContent;
+  const codeBlockMatch = rawContent.match(/```json\s*([\s\S]*?)\s*```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1];
+  } else {
+    const firstBrace = rawContent.indexOf("{");
+    const lastBrace = rawContent.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      jsonStr = rawContent.slice(firstBrace, lastBrace + 1);
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+    // Return the refined prompt string
+    return parsed.prompt || rawContent;
+  } catch {
+    // Fallback: return the raw content cleaned up
+    return rawContent.replace(/```/g, "").trim();
+  }
+}
+
+// Reuse composition config for LLM calls
+function getConfig() {
+  return {
+    apiUrl: process.env.COMPOSITION_API_URL || process.env.VENICE_API_URL || "https://api.venice.ai/api/v1",
+    apiKey: process.env.COMPOSITION_API_KEY || process.env.VENICE_API_KEY || "",
+    model: process.env.COMPOSITION_MODEL || process.env.VENICE_MODEL || "z-ai-glm-5-turbo",
+  }
+}
+
 export async function generateMusicPromptFromVideo(
   eventName: string,
   sport: string,
