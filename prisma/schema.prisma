@@ -31,6 +31,7 @@ model GeneratedAsset {
   outputType   OutputType
   fileName     String
   filePath     String
+  fileSize     Int         @default(0)
   immichAssetId String?    // References Immich asset
   compositionScript String? @db.Text
   status       GenerationStatus @default(PENDING)

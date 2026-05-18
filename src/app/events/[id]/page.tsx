@@ -641,12 +641,34 @@ export default function EventPage() {
                     Close
                   </button>
                   <button
-                    onClick={() => {
-                      alert("Composition execution coming in US-008!");
+                    disabled={compositionLoading}
+                    onClick={async () => {
+                      setCompositionLoading(true);
+                      try {
+                        const res = await fetch("/api/composition/execute", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            script: compositionScript,
+                            eventId: id,
+                          }),
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                          alert(`Composition complete!\nFile: ${data.fileName}\nSize: ${(data.fileSize / 1024 / 1024).toFixed(2)} MB`);
+                          setShowScriptPanel(false);
+                        } else {
+                          alert(`Error: ${data.error}`);
+                        }
+                      } catch {
+                        alert("Failed to execute composition");
+                      } finally {
+                        setCompositionLoading(false);
+                      }
                     }}
-                    className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)]"
+                    className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    Execute Composition
+                    {compositionLoading ? "Processing..." : "Execute Composition"}
                   </button>
                 </div>
               </>
