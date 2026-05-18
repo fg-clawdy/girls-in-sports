@@ -12,6 +12,15 @@ interface EventData {
   eventDate: string;
   description: string | null;
   immichAlbumId: string | null;
+  generatedAssets: Array<{
+    id: string;
+    outputType: string;
+    fileName: string;
+    fileSize: number;
+    status: string;
+    createdAt: string;
+    immichAssetId: string | null;
+  }>;
 }
 
 interface ImmichAsset {
@@ -402,6 +411,39 @@ export default function EventPage() {
           </div>
         )}
 
+        {/* Generated Results */}
+        {event?.generatedAssets && event.generatedAssets.length > 0 && (
+          <div className="mb-6">
+            <h2 className="text-sm font-semibold text-zinc-700 mb-3">Generated Compositions</h2>
+            <div className="flex flex-wrap gap-3">
+              {event.generatedAssets.map((ga) => (
+                <Link
+                  key={ga.id}
+                  href={`/results/${ga.id}`}
+                  className="flex items-center gap-3 bg-white border border-zinc-200 rounded-lg px-4 py-3 hover:shadow-sm transition-shadow"
+                >
+                  <span className="text-xl">
+                    {ga.outputType === "COLLAGE_POSTER" ? "🖼️" : "🎬"}
+                  </span>
+                  <div>
+                    <p className="text-sm font-medium text-zinc-900">{ga.fileName}</p>
+                    <p className="text-xs text-zinc-500">
+                      {ga.status === "COMPLETED"
+                        ? `${(ga.fileSize / 1024 / 1024).toFixed(2)} MB · ${new Date(ga.createdAt).toLocaleDateString()}`
+                        : ga.status}
+                    </p>
+                  </div>
+                  {ga.immichAssetId && (
+                    <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
+                      In Album
+                    </span>
+                  )}
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Media Grid */}
         {album && album.assets.length > 0 ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
@@ -749,6 +791,7 @@ export default function EventPage() {
                         if (data.success) {
                           alert(`Composition complete!\nFile: ${data.fileName}\nSize: ${(data.fileSize / 1024 / 1024).toFixed(2)} MB`);
                           setShowScriptPanel(false);
+                          await fetchEventData();
                         } else {
                           alert(`Error: ${data.error}`);
                         }
