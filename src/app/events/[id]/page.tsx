@@ -64,6 +64,13 @@ export default function EventPage() {
     isSpendLimit?: boolean;
   } | null>(null);
   const [rankingLoading, setRankingLoading] = useState(false);
+  const [rankingProgress, setRankingProgress] = useState<{
+    totalBatches: number;
+    completedBatches: number;
+    failedBatches: number;
+    currentBatch: number;
+    status: string;
+  } | null>(null);
   const [showRankingPanel, setShowRankingPanel] = useState(false);
   const [compositionScript, setCompositionScript] = useState<any>(null);
   const [compositionLoading, setCompositionLoading] = useState(false);
@@ -207,17 +214,36 @@ export default function EventPage() {
 
     setRankingLoading(true);
     setShowRankingPanel(true);
+    setRankingProgress(null);
 
     try {
       const idsToRank = letAiChoose
         ? filteredAssets.map((a) => a.id)
         : Array.from(selectedIds);
 
-      const res = await fetch("/api/ai/vision/rank", {
+      // Build asset types map for videos
+      const assetTypes: Record<string, "IMAGE" | "VIDEO"> = {};
+      for (const asset of filteredAssets) {
+        assetTypes[asset.id] = asset.type === "VIDEO" ? "VIDEO" : "IMAGE";
+      }
+
+      // Show initial progress
+      const totalItems = idsToRank.length;
+      const estimatedBatches = Math.ceil(totalItems / 3);
+      setRankingProgress({
+        totalBatches: estimatedBatches,
+        completedBatches: 0,
+        failedBatches: 0,
+        currentBatch: 0,
+        status: `Preparing to analyze ${totalItems} media items in ${estimatedBatches} batches...`,
+      });
+
+      const res = await fetch("/api/ai/vision/rank/batch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           assetIds: idsToRank,
+          assetTypes,
           eventId: id,
         }),
       });
@@ -226,30 +252,49 @@ export default function EventPage() {
 
       if (data.success) {
         setRanking(data);
+        setRankingProgress({
+          totalBatches: data.totalBatches,
+          completedBatches: data.completedBatches,
+          failedBatches: data.failedBatches || 0,
+          currentBatch: data.totalBatches,
+          status: `Analysis complete! ${data.totalAssetsAnalyzed} items scored across ${data.completedBatches}/${data.totalBatches} batches.`,
+        });
         // Pre-select top-ranked assets
         if (data.topIds?.length > 0) {
           setSelectedIds(new Set(data.topIds));
         }
       } else {
-        // Server returned an error response — preserve the actual visionConfigured flag
+        // Server returned an error response
         setRanking({
-          scores: [],
-          topIds: idsToRank.slice(0, 10),
+          scores: data.scores || [],
+          topIds: data.topIds || idsToRank.slice(0, 10),
           modelUsed: data.modelUsed || "error-fallback",
           visionConfigured: data.visionConfigured ?? false,
           error: data.error,
           isSpendLimit: data.isSpendLimit,
         });
+        setRankingProgress({
+          totalBatches: data.totalBatches || 0,
+          completedBatches: data.completedBatches || 0,
+          failedBatches: data.failedBatches || 0,
+          currentBatch: data.totalBatches || 0,
+          status: data.error || "Analysis failed",
+        });
       }
-    } catch {
-      // Network / parsing error — we don't know if vision is configured, assume true
-      // since it's configured on the server and this is likely a transient issue
+    } catch (err: any) {
       setRanking({
         scores: [],
         topIds: Array.from(selectedIds).slice(0, 10),
         modelUsed: "error-fallback",
         visionConfigured: true,
-        error: "Network error — please retry",
+        error: err.message || "Network error — please retry",
+      });
+      setRankingProgress({
+        totalBatches: 0,
+        completedBatches: 0,
+        failedBatches: 0,
+        currentBatch: 0,
+        status: err.message || "Network error — please retry",
       });
     } finally {
       setRankingLoading(false);
@@ -515,11 +560,48 @@ export default function EventPage() {
               )}
             </div>
 
-            {rankingLoading && !ranking && (
-              <div className="text-center py-8">
+            {rankingLoading && (
+              <div className="text-center py-6">
                 <div className="w-8 h-8 border-2 border-zinc-200 border-t-[var(--accent)] rounded-full animate-spin mx-auto mb-3" />
-                <p className="text-sm text-zinc-500">AI is analyzing your media...</p>
-                <p className="text-xs text-zinc-400 mt-1">Evaluating composition, action, faces, lighting, and emotion</p>
+                <p className="text-sm text-zinc-600 font-medium">
+                  {rankingProgress?.status || "AI is analyzing your media..."}
+                </p>
+                {rankingProgress && rankingProgress.totalBatches > 0 && (
+                  <div className="mt-3 max-w-xs mx-auto">
+                    <div className="flex items-center justify-between text-xs text-zinc-500 mb-1">
+                      <span>Batch {rankingProgress.currentBatch + 1} / {rankingProgress.totalBatches}</span>
+                      <span>
+                        {rankingProgress.completedBatches} done
+                        {rankingProgress.failedBatches > 0 && `, ${rankingProgress.failedBatches} failed`}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-zinc-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--accent)] rounded-full transition-all duration-500"
+                        style={{
+                          width: `${rankingProgress.totalBatches > 0
+                            ? ((rankingProgress.completedBatches + rankingProgress.failedBatches) / rankingProgress.totalBatches) * 100
+                            : 0}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+                <p className="text-xs text-zinc-400 mt-2">
+                  Analyzing composition, action, faces, lighting, and emotion
+                </p>
+              </div>
+            )}
+
+            {/* Post-analysis summary */}
+            {!rankingLoading && rankingProgress && (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4">
+                <p className="text-sm text-green-800 font-medium">{rankingProgress.status}</p>
+                {rankingProgress.failedBatches > 0 && (
+                  <p className="text-xs text-green-700 mt-0.5">
+                    {rankingProgress.failedBatches} batch(es) had issues but partial results are shown.
+                  </p>
+                )}
               </div>
             )}
 
