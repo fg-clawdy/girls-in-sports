@@ -29,6 +29,14 @@ export default function ResultDetailPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
+  const [musicModels, setMusicModels] = useState<any[]>([]);
+  const [selectedMusicModel, setSelectedMusicModel] = useState("minimax-music-v2");
+  const [musicTempo, setMusicTempo] = useState<"upbeat" | "calm" | "dramatic">("upbeat");
+  const [musicPrompt, setMusicPrompt] = useState("");
+  const [musicLoading, setMusicLoading] = useState(false);
+  const [musicStatus, setMusicStatus] = useState("");
+  const [generatedMusicPath, setGeneratedMusicPath] = useState("");
+  const [mixingMusic, setMixingMusic] = useState(false);
 
   useEffect(() => {
     fetch(`/api/results/${id}`)
@@ -75,6 +83,97 @@ export default function ResultDetailPage() {
 
   const isImage = asset?.outputType === "COLLAGE_POSTER";
   const isVideo = asset?.outputType === "WRAP_UP_VIDEO" || asset?.outputType === "HIGHLIGHT_VIDEO_15S";
+
+  // Load music models on mount
+  useEffect(() => {
+    fetch("/api/music/generate", { method: "GET" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success) setMusicModels(data.models);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Auto-generate music prompt when asset loads
+  useEffect(() => {
+    if (asset && isVideo) {
+      const type = asset.outputType === "HIGHLIGHT_VIDEO_15S" ? "highlight" : "wrapup";
+      fetch("/api/music/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventName: asset.event.name,
+          sport: asset.event.sport,
+          compositionType: type,
+          targetTempo: musicTempo,
+        }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.success) setMusicPrompt(data.prompt);
+        })
+        .catch(() => {});
+    }
+  }, [asset, musicTempo]);
+
+  const handleGenerateMusic = async () => {
+    setMusicLoading(true);
+    setMusicStatus("Queuing music generation...");
+    setGeneratedMusicPath("");
+    try {
+      const res = await fetch("/api/music/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: selectedMusicModel,
+          prompt: musicPrompt,
+          durationSeconds: isVideo ? undefined : 60,
+          forceInstrumental: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.filePath) {
+        setGeneratedMusicPath(data.filePath);
+        setMusicStatus(`Generated! (${data.model}, $${getModelPrice()})`);
+      } else {
+        setMusicStatus(`Failed: ${data.error || "Unknown error"}`);
+      }
+    } catch (err: any) {
+      setMusicStatus(`Error: ${err.message || "Music generation failed"}`);
+    } finally {
+      setMusicLoading(false);
+    }
+  };
+
+  const handleMixMusic = async () => {
+    if (!generatedMusicPath) return;
+    setMixingMusic(true);
+    setMusicStatus("Mixing music into video...");
+    try {
+      const res = await fetch(`/api/results/${id}/music`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ musicFilePath: generatedMusicPath }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMusicStatus("Background music added to video! Refresh to preview.");
+        // Force video reload by appending timestamp
+        setTimeout(() => window.location.reload(), 500);
+      } else {
+        setMusicStatus(`Mix failed: ${data.error}`);
+      }
+    } catch (err: any) {
+      setMusicStatus(`Mix error: ${err.message || "Failed"}`);
+    } finally {
+      setMixingMusic(false);
+    }
+  };
+
+  const getModelPrice = () => {
+    const model = musicModels.find((m) => m.id === selectedMusicModel);
+    return model ? `$${model.pricingUsd}` : "?";
+  };
 
   return (
     <div className="min-h-screen bg-zinc-50">
@@ -205,6 +304,126 @@ export default function ResultDetailPage() {
                 </p>
               )}
             </div>
+
+            {/* Music Generation (video only) */}
+            {isVideo && (
+              <div className="bg-white rounded-lg border border-zinc-200 p-6">
+                <h2 className="text-lg font-semibold text-zinc-900 mb-4">
+                  Background Music
+                </h2>
+
+                <div className="space-y-4">
+                  {/* Tempo selection */}
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-2">
+                      Mood / Tempo
+                    </label>
+                    <div className="flex gap-2">
+                      {(["upbeat", "calm", "dramatic"] as const).map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => setMusicTempo(t)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium capitalize transition-colors ${
+                            musicTempo === t
+                              ? "bg-[var(--accent)] text-white"
+                              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                          }`}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Model selection */}
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-2">
+                      AI Music Model
+                    </label>
+                    <select
+                      value={selectedMusicModel}
+                      onChange={(e) => setSelectedMusicModel(e.target.value)}
+                      className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent"
+                    >
+                      {musicModels.length === 0 && (
+                        <option value="minimax-music-v2">minimax-music-v2 ($0.04)</option>
+                      )}
+                      {musicModels.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name} — ${m.pricingUsd}{m.supportsInstrumental ? ", instrumental" : ", with vocals"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Prompt editor */}
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-2">
+                      Music Prompt
+                      <span className="text-zinc-400 font-normal ml-1">
+                        (edit to refine the sound)
+                      </span>
+                    </label>
+                    <textarea
+                      value={musicPrompt}
+                      onChange={(e) => setMusicPrompt(e.target.value)}
+                      rows={4}
+                      className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
+                      placeholder="Describe the background music you want..."
+                    />
+                  </div>
+
+                  {/* Generate button */}
+                  <div className="flex flex-wrap gap-3 items-center">
+                    <button
+                      onClick={handleGenerateMusic}
+                      disabled={musicLoading || !musicPrompt.trim()}
+                      className="px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {musicLoading ? "Generating..." : `Generate Music (${getModelPrice()})`}
+                    </button>
+
+                    {generatedMusicPath && (
+                      <button
+                        onClick={handleMixMusic}
+                        disabled={mixingMusic}
+                        className="px-4 py-2.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {mixingMusic ? "Mixing..." : "Add to Video"}
+                      </button>
+                    )}
+                  </div>
+
+                  {musicStatus && (
+                    <p
+                      className={`text-sm ${
+                        musicStatus.includes("Failed") || musicStatus.includes("failed")
+                          ? "text-red-600"
+                          : musicStatus.includes("Mix")
+                          ? "text-amber-600"
+                          : "text-green-600"
+                      }`}
+                    >
+                      {musicStatus}
+                    </p>
+                  )}
+
+                  {/* Preview generated music */}
+                  {generatedMusicPath && !musicLoading && (
+                    <div className="mt-3">
+                      <p className="text-sm text-zinc-600 mb-2">Preview:</p>
+                      <audio
+                        controls
+                        className="w-full"
+                        src={`/api/music/download?path=${encodeURIComponent(generatedMusicPath)}`}
+                      >
+                        Your browser does not support the audio tag.
+                      </audio>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </main>
