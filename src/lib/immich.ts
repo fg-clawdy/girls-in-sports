@@ -71,7 +71,7 @@ export async function getAllAlbums(): Promise<ImmichAlbum[]> {
 }
 
 export async function getAlbum(albumId: string): Promise<ImmichAlbum> {
-  const res = await fetch(`${IMMICH_URL}/api/albums/${albumId}`, {
+  const res = await fetch(`${IMMICH_URL}/api/albums/${albumId}?withoutAssets=false`, {
     headers: getHeaders(),
   });
   if (!res.ok) {

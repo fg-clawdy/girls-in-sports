@@ -430,7 +430,7 @@ export default function EventPage() {
             <p className="text-zinc-500">
               {filter !== "all"
                 ? `No ${filter === "image" ? "photos" : "videos"} found.`
-                : "This album is empty. Upload media via the Immich app."}
+                : "This album is empty. Upload media."}
             </p>
           </div>
         ) : (
