@@ -4,14 +4,26 @@ import {
   fallbackRanking,
   isVisionConfigured,
 } from "@/lib/vision";
-import { getAssetPreviewUrl, getAssetThumbnailUrl } from "@/lib/immich";
+import { getAssetPreviewUrl, getAssetThumbnailUrl, getAssetOriginalUrl } from "@/lib/immich";
+import * as childProcess from "child_process";
+import * as fsPromises from "fs/promises";
+import * as pathModule from "path";
+import * as osModule from "os";
 
-// Batch-rank all media (images + video frames) with progress events via HTTP/1.1 SSE-style chunked JSON
-// Since Next.js App Router route handlers don't support streaming SSE well, we return a single
-// JSON response with a `batches` field showing per-batch progress, plus final combined scores.
+// Need these for route code
+const { spawn } = childProcess;
+const { mkdtemp, writeFile, readFile, unlink, rmdir } = fsPromises;
+const path = pathModule;
+const os = osModule;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BATCH VISION RANKING — All media analyzed, videos sampled at 1 frame / 1.5s
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const BATCH_SIZE = 3;
-const VIDEO_FRAME_COUNT = 3; // Extract 3 frames per video for analysis
+const SECONDS_PER_FRAME = 1.5;
+const MIN_VIDEO_FRAMES = 3;
+const MAX_VIDEO_FRAMES = 20;
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -22,106 +34,124 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 }
 
 /**
- * Extract representative frames from a video using ffmpeg.
- * Returns an array of frame objects with base64 data.
+ * Download a video from Immich to a temp file so ffmpeg can process it.
+ * Immich requires x-api-key header which ffmpeg can't send directly.
+ */
+async function downloadVideoToTemp(videoUrl: string, apiKey: string): Promise<string> {
+  const tmpFile = path.join(os.tmpdir(), `gis-video-${Date.now()}.mp4`);
+  const res = await fetch(videoUrl, {
+    headers: { "x-api-key": apiKey },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to download video: ${res.status} ${res.statusText}`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  await writeFile(tmpFile, buffer);
+  return tmpFile;
+}
+
+/**
+ * Extract frames from a local video file using ffmpeg.
+ * Returns frame items with data URLs ready for vision model.
  */
 async function extractVideoFrames(
-  videoUrl: string,
+  localVideoPath: string,
   assetId: string,
-  count: number
-): Promise<{ assetId: string; url: string; isFrame: true; frameIndex: number }[]> {
-  const { spawn } = require("child_process");
-  const { mkdtemp } = require("fs/promises");
-  const path = require("path");
-  const os = require("os");
+  durationSec: number
+): Promise<{ assetId: string; url: string; frameIndex: number; timestamp: number }[]> {
+  // Calculate frame count: 1 frame per SECONDS_PER_FRAME, bounded by min/max
+  const rawCount = Math.floor(durationSec / SECONDS_PER_FRAME);
+  const frameCount = Math.min(Math.max(rawCount, MIN_VIDEO_FRAMES), MAX_VIDEO_FRAMES);
 
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gis-frames-"));
   const framePaths: string[] = [];
 
-  // First get video duration via ffprobe
-  const ffprobe = spawn("ffprobe", [
-    "-v", "error",
-    "-show_entries", "format=duration",
-    "-of", "default=noprint_wrappers=1:nokey=1",
-    videoUrl,
-  ]);
+  // Spread timestamps evenly across the video, padding away from edges
+  const edgePad = Math.min(0.5, durationSec * 0.05); // 0.5s or 5% of duration
+  const usableDuration = Math.max(durationSec - edgePad * 2, 1);
+  const timestamps: number[] = [];
+  for (let i = 0; i < frameCount; i++) {
+    const pct = (i + 1) / (frameCount + 1);
+    timestamps.push(edgePad + usableDuration * pct);
+  }
 
-  let durationStr = "";
-  ffprobe.stdout.on("data", (data: Buffer) => { durationStr += data.toString(); });
-
-  await new Promise<void>((resolve, reject) => {
-    ffprobe.on("close", (code: number) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffprobe failed: ${code}`));
-    });
-    ffprobe.on("error", reject);
-  });
-
-  const duration = parseFloat(durationStr.trim()) || 5;
-  const timestamps = Array.from({ length: count }, (_, i) => {
-    // Spread evenly: avoid first/last second, pick middle + thirds
-    const pct = (i + 1) / (count + 1);
-    return Math.min(duration * pct, duration - 0.5);
-  });
-
-  // Extract frames
-  const promises = timestamps.map((ts, idx) => {
-    const outPath = path.join(tmpDir, `${assetId}_frame_${idx}.jpg`);
-    framePaths.push(outPath);
-    return new Promise<void>((resolve, reject) => {
-      const ffmpeg = spawn("ffmpeg", [
-        "-ss", String(ts),
-        "-i", videoUrl,
-        "-vframes", "1",
-        "-q:v", "2",
-        "-y",
-        outPath,
-      ]);
-      ffmpeg.on("close", (code: number) => {
-        if (code === 0) resolve();
-        else reject(new Error(`ffmpeg frame ${idx} failed: ${code}`));
+  // Extract frames with ffmpeg — use fast seek then accurate decode
+  await Promise.all(
+    timestamps.map((ts, idx) => {
+      const outPath = path.join(tmpDir, `${assetId}_f${idx}.jpg`);
+      framePaths.push(outPath);
+      return new Promise<void>((resolve, reject) => {
+        const ffmpeg = spawn("ffmpeg", [
+          "-ss", String(ts),
+          "-i", localVideoPath,
+          "-vframes", "1",
+          "-q:v", "2",
+          "-y",
+          outPath,
+        ]);
+        ffmpeg.on("close", (code: number | null) => {
+          if (code === 0) resolve();
+          else reject(new Error(`ffmpeg frame ${idx} failed: code ${code}`));
+        });
+        ffmpeg.on("error", reject);
       });
-      ffmpeg.on("error", reject);
-    });
-  });
+    })
+  );
 
-  await Promise.all(promises);
-
-  // Convert frames to data URLs for the vision model
-  const fs = require("fs/promises");
+  // Convert to data URLs
   const frames = await Promise.all(
-    framePaths.map(async (fp: string, idx: number) => {
-      const buf = await fs.readFile(fp);
+    framePaths.map(async (fp, idx) => {
+      const buf = await readFile(fp);
       const base64 = buf.toString("base64");
-      const dataUrl = `data:image/jpeg;base64,${base64}`;
       return {
         assetId,
-        url: dataUrl,
-        isFrame: true as const,
+        url: `data:image/jpeg;base64,${base64}`,
         frameIndex: idx,
+        timestamp: timestamps[idx],
       };
     })
   );
 
-  // Cleanup temp files
-  try {
-    for (const fp of framePaths) await fs.unlink(fp);
-    await fs.rmdir(tmpDir);
-  } catch {
-    // ignore cleanup errors
-  }
+  // Cleanup
+  await Promise.all(framePaths.map((fp) => unlink(fp).catch(() => {})));
+  await rmdir(tmpDir).catch(() => {});
 
   return frames;
 }
 
+// ─── Weighting Strategy ───────────────────────────────────────────────────────
+// Each frame's weight is based on temporal position:
+//   • First 20% and last 20% of video: weight 0.7 (often setup/teardown)
+//   • Middle 60%: weight 1.0 (core content)
+// This prevents an intro title card or outro from dragging the average down.
+function computeFrameWeight(timestamp: number, duration: number): number {
+  if (duration <= 0) return 1.0;
+  const pct = timestamp / duration;
+  if (pct < 0.2 || pct > 0.8) return 0.7;
+  return 1.0;
+}
+
+interface AnalysisItem {
+  assetId: string;
+  url: string;
+  isFrame: boolean;
+  frameIndex?: number;
+  timestamp?: number;
+  duration?: number; // set for video frames so weight can be computed
+}
+
+// ─── POST handler ─────────────────────────────────────────────────────────────
+
 export async function POST(request: Request) {
   let assetIds: string[] = [];
   let assetTypes: Record<string, "IMAGE" | "VIDEO"> = {};
+  let assetDurations: Record<string, number> = {};
 
   try {
     const body = await request.json();
     assetIds = body.assetIds || [];
     assetTypes = body.assetTypes || {};
+    assetDurations = body.assetDurations || {};
     const eventId = body.eventId;
 
     if (!Array.isArray(assetIds) || assetIds.length === 0) {
@@ -142,40 +172,80 @@ export async function POST(request: Request) {
         batches: [],
         totalBatches: 0,
         completedBatches: 0,
+        failedBatches: 0,
+        totalAssetsAnalyzed: 0,
+        assetFrameCounts: {},
       });
     }
 
-    // Build a list of all items to analyze:
-    // Images → one item each
-    // Videos → multiple frame items each
-    const analysisItems: {
-      assetId: string;
-      url: string;
-      isFrame: boolean;
-      frameIndex?: number;
-    }[] = [];
+    const apiKey = process.env.IMMICH_API_KEY || "";
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 1: Build analysis item list (images = 1 item, videos = N frames)
+    // ═══════════════════════════════════════════════════════════════════════
+    const analysisItems: AnalysisItem[] = [];
+    const assetFrameCounts: Record<string, number> = {};
+    const tempVideoFiles: string[] = [];
 
     for (const id of assetIds) {
       const type = assetTypes[id] || "IMAGE";
       if (type === "VIDEO") {
-        // For videos, we'll extract frames and use the thumbnail as a fallback
-        const thumbUrl = getAssetThumbnailUrl(id);
-        analysisItems.push({
-          assetId: id,
-          url: thumbUrl,
-          isFrame: false,
-        });
+        const duration = assetDurations[id] || 5; // fallback 5s if unknown
+        const frameCount = Math.min(
+          Math.max(Math.floor(duration / SECONDS_PER_FRAME), MIN_VIDEO_FRAMES),
+          MAX_VIDEO_FRAMES
+        );
+        assetFrameCounts[id] = frameCount;
+
+        try {
+          // Download video, extract frames, cleanup
+          const videoUrl = getAssetOriginalUrl(id);
+          const localPath = await downloadVideoToTemp(videoUrl, apiKey);
+          tempVideoFiles.push(localPath);
+
+          const frames = await extractVideoFrames(localPath, id, duration);
+          for (const frame of frames) {
+            analysisItems.push({
+              assetId: frame.assetId,
+              url: frame.url,
+              isFrame: true,
+              frameIndex: frame.frameIndex,
+              timestamp: frame.timestamp,
+              duration,
+            });
+          }
+
+          // Remove temp video file immediately after frame extraction
+          await unlink(localPath).catch(() => {});
+        } catch (err: any) {
+          console.error(`Frame extraction failed for video ${id}:`, err.message);
+          // Fallback: use thumbnail as single frame
+          assetFrameCounts[id] = 1;
+          analysisItems.push({
+            assetId: id,
+            url: getAssetThumbnailUrl(id),
+            isFrame: false,
+          });
+        }
       } else {
-        const previewUrl = getAssetPreviewUrl(id);
+        // Image: single item
+        assetFrameCounts[id] = 1;
         analysisItems.push({
           assetId: id,
-          url: previewUrl,
+          url: getAssetPreviewUrl(id),
           isFrame: false,
         });
       }
     }
 
-    // Chunk into batches of BATCH_SIZE
+    // Cleanup any orphaned temp files
+    for (const tmpFile of tempVideoFiles) {
+      await unlink(tmpFile).catch(() => {});
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 2: Chunk into batches and analyze
+    // ═══════════════════════════════════════════════════════════════════════
     const batches = chunkArray(analysisItems, BATCH_SIZE);
     const batchResults: {
       batchIndex: number;
@@ -186,24 +256,34 @@ export async function POST(request: Request) {
     }[] = batches.map((batch, idx) => ({
       batchIndex: idx,
       batchSize: batch.length,
-      assetIds: [...new Set(batch.map((item) => item.assetId))],
+      assetIds: Array.from(new Set(batch.map((item) => item.assetId))),
       status: "pending" as const,
     }));
 
-    // Collect all scores across batches
-    const allScores: Map<
+    // Accumulator: per-asset weighted scores
+    const accumulator: Map<
       string,
-      { score: number; reasons: string[]; batchCount: number; frameScores: number[] }
+      {
+        weightedScoreSum: number;
+        weightSum: number;
+        reasons: string[];
+        batchCount: number;
+        frameCount: number;
+      }
     > = new Map();
 
-    // Initialize all assets with empty score tracking
     for (const id of assetIds) {
-      allScores.set(id, { score: 0, reasons: [], batchCount: 0, frameScores: [] });
+      accumulator.set(id, {
+        weightedScoreSum: 0,
+        weightSum: 0,
+        reasons: [],
+        batchCount: 0,
+        frameCount: 0,
+      });
     }
 
     let modelUsed = "unknown";
 
-    // Process batches sequentially to avoid overwhelming the API
     for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
       const batch = batches[batchIdx];
       batchResults[batchIdx].status = "processing";
@@ -220,14 +300,22 @@ export async function POST(request: Request) {
 
         modelUsed = result.modelUsed;
 
-        // Merge scores into accumulator
+        // Merge scores with temporal weighting
         for (const score of result.scores) {
-          const current = allScores.get(score.assetId);
-          if (current) {
-            current.frameScores.push(score.score);
-            current.reasons.push(...score.reasons);
-            current.batchCount++;
+          const item = batch.find((i) => i.assetId === score.assetId);
+          const current = accumulator.get(score.assetId);
+          if (!current) continue;
+
+          let weight = 1.0;
+          if (item?.isFrame && item.duration && item.timestamp !== undefined) {
+            weight = computeFrameWeight(item.timestamp, item.duration);
           }
+
+          current.weightedScoreSum += score.score * weight;
+          current.weightSum += weight;
+          current.reasons.push(...score.reasons);
+          current.batchCount++;
+          current.frameCount++;
         }
 
         batchResults[batchIdx].status = "completed";
@@ -236,40 +324,47 @@ export async function POST(request: Request) {
         batchResults[batchIdx].status = "failed";
         batchResults[batchIdx].error = errMsg;
         console.error(`Batch ${batchIdx} failed:`, errMsg);
-        // Continue with remaining batches — partial results are still useful
       }
     }
 
-    // Compute final scores: average across all frames/batches for each asset
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 3: Compute final weighted scores
+    // ═══════════════════════════════════════════════════════════════════════
     const finalScores: {
       assetId: string;
       score: number;
       rank: number;
       reasons: string[];
+      framesAnalyzed: number;
+      weighting: string;
     }[] = [];
 
-    for (const [id, data] of allScores) {
-      if (data.batchCount > 0) {
-        const avgScore =
-          data.frameScores.reduce((a, b) => a + b, 0) / data.frameScores.length;
-        // Deduplicate and limit reasons
-        const uniqueReasons = [...new Set(data.reasons)].slice(0, 5);
+    for (const [id, data] of Array.from(accumulator)) {
+      if (data.weightSum > 0) {
+        const weightedAvg = data.weightedScoreSum / data.weightSum;
+        const uniqueReasons = Array.from(new Set(data.reasons)).slice(0, 5);
+        const frameCount = assetFrameCounts[id] || data.frameCount;
         finalScores.push({
           assetId: id,
-          score: Math.round(avgScore),
-          rank: 0, // computed below
+          score: Math.round(weightedAvg),
+          rank: 0,
           reasons: uniqueReasons,
+          framesAnalyzed: frameCount,
+          weighting:
+            frameCount > 1
+              ? `Weighted mean: edge frames ×0.7, core frames ×1.0 (${data.frameCount} frames across ${data.batchCount} batch${data.batchCount !== 1 ? "es" : ""})`
+              : "Single-frame analysis (thumbnail)",
         });
       }
     }
 
-    // Sort by score descending
+    // Sort and rank
     finalScores.sort((a, b) => b.score - a.score);
     finalScores.forEach((s, i) => {
       s.rank = i + 1;
     });
 
-    // Assets with no scores get fallback
+    // Fallback for unscored assets
     const scoredIds = new Set(finalScores.map((s) => s.assetId));
     for (const id of assetIds) {
       if (!scoredIds.has(id)) {
@@ -278,17 +373,19 @@ export async function POST(request: Request) {
           score: 50,
           rank: finalScores.length + 1,
           reasons: ["No AI analysis available — default ranking applied"],
+          framesAnalyzed: assetFrameCounts[id] || 0,
+          weighting: "Fallback (no vision data)",
         });
       }
     }
-
-    // Re-rank after adding fallbacks
     finalScores.sort((a, b) => b.score - a.score);
     finalScores.forEach((s, i) => {
       s.rank = i + 1;
     });
 
     const topIds = finalScores.slice(0, 10).map((s) => s.assetId);
+    const completedBatches = batchResults.filter((b) => b.status === "completed").length;
+    const failedBatches = batchResults.filter((b) => b.status === "failed").length;
 
     return NextResponse.json({
       success: true,
@@ -299,9 +396,13 @@ export async function POST(request: Request) {
       eventId: eventId || null,
       batches: batchResults,
       totalBatches: batches.length,
-      completedBatches: batchResults.filter((b) => b.status === "completed").length,
-      failedBatches: batchResults.filter((b) => b.status === "failed").length,
+      completedBatches,
+      failedBatches,
       totalAssetsAnalyzed: assetIds.length,
+      assetFrameCounts,
+      secondsPerFrame: SECONDS_PER_FRAME,
+      weightingStrategy:
+        "Edge frames (first/last 20%) weighted 0.7×, core frames weighted 1.0×. Scores are weighted averages.",
     });
   } catch (error) {
     console.error("Vision batch analysis error:", error);
@@ -309,12 +410,15 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         error: errMsg,
-        scores: [],
+        scores: fallbackRanking(assetIds).scores,
         topIds: assetIds.slice(0, 10),
         visionConfigured: isVisionConfigured(),
         batches: [],
         totalBatches: 0,
         completedBatches: 0,
+        failedBatches: 0,
+        totalAssetsAnalyzed: 0,
+        assetFrameCounts: {},
       },
       { status: 500 }
     );

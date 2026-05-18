@@ -56,7 +56,14 @@ export default function EventPage() {
   const [outputType, setOutputType] = useState<OutputType | null>(null);
   const [letAiChoose, setLetAiChoose] = useState(false);
   const [ranking, setRanking] = useState<{
-    scores: Array<{ assetId: string; score: number; rank: number; reasons: string[] }>;
+    scores: Array<{
+      assetId: string;
+      score: number;
+      rank: number;
+      reasons: string[];
+      framesAnalyzed?: number;
+      weighting?: string;
+    }>;
     topIds: string[];
     modelUsed: string;
     visionConfigured: boolean;
@@ -221,10 +228,31 @@ export default function EventPage() {
         ? filteredAssets.map((a) => a.id)
         : Array.from(selectedIds);
 
-      // Build asset types map for videos
+      // Build asset types + durations map
       const assetTypes: Record<string, "IMAGE" | "VIDEO"> = {};
+      const assetDurations: Record<string, number> = {};
       for (const asset of filteredAssets) {
         assetTypes[asset.id] = asset.type === "VIDEO" ? "VIDEO" : "IMAGE";
+        // Parse ISO 8601 duration like "PT00H00M05S" or simple "00:00:05"
+        const durStr = (asset.duration || "").toString();
+        if (durStr) {
+          // Try PT format first
+          const ptMatch = durStr.match(/PT(\d+H)?(\d+M)?([\d.]+S)?/);
+          if (ptMatch) {
+            const hours = parseInt(ptMatch[1] || "0H");
+            const mins = parseInt(ptMatch[2] || "0M");
+            const secs = parseFloat(ptMatch[3] || "0S");
+            assetDurations[asset.id] = hours * 3600 + mins * 60 + secs;
+          } else {
+            // Try HH:MM:SS format
+            const parts = durStr.split(":").map(Number);
+            if (parts.length === 3) {
+              assetDurations[asset.id] = parts[0] * 3600 + parts[1] * 60 + parts[2];
+            } else if (parts.length === 2) {
+              assetDurations[asset.id] = parts[0] * 60 + parts[1];
+            }
+          }
+        }
       }
 
       // Show initial progress
@@ -244,6 +272,7 @@ export default function EventPage() {
         body: JSON.stringify({
           assetIds: idsToRank,
           assetTypes,
+          assetDurations,
           eventId: id,
         }),
       });
@@ -671,11 +700,26 @@ export default function EventPage() {
                           {score.rank}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
                             <span className="font-medium text-zinc-900 text-sm">
                               Score: {score.score}/100
                             </span>
+                            {score.framesAnalyzed && score.framesAnalyzed > 1 && (
+                              <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">
+                                {score.framesAnalyzed} frames analyzed
+                              </span>
+                            )}
+                            {score.framesAnalyzed === 1 && (
+                              <span className="text-xs px-1.5 py-0.5 bg-zinc-100 text-zinc-500 rounded">
+                                1 frame
+                              </span>
+                            )}
                           </div>
+                          {score.weighting && (
+                            <p className="text-[11px] text-zinc-400 mb-1.5 leading-tight">
+                              {score.weighting}
+                            </p>
+                          )}
                           <div className="flex flex-wrap gap-1">
                             {score.reasons.map((r, i) => (
                               <span
