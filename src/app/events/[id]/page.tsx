@@ -58,6 +58,12 @@ export default function EventPage() {
   const [compositionLoading, setCompositionLoading] = useState(false);
   const [showScriptPanel, setShowScriptPanel] = useState(false);
   const [feedbackMap, setFeedbackMap] = useState<Record<string, "POSITIVE" | "NEGATIVE">>({});
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
+    { role: "assistant", content: "Hi! I'm your composition assistant. Ask me anything about creating great sports content!" },
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
 
   const fetchEventData = useCallback(async () => {
     try {
@@ -700,6 +706,145 @@ export default function EventPage() {
             )}
           </div>
         </div>
+      )}
+      {/* AI Assistant Chat Panel */}
+      {chatOpen && (
+        <div className="fixed bottom-4 right-4 w-80 sm:w-96 bg-white rounded-xl border border-zinc-200 shadow-2xl z-50 flex flex-col overflow-hidden" style={{ maxHeight: "500px" }}>
+          {/* Chat header */}
+          <div className="px-4 py-3 bg-[var(--accent)] text-white flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">🤖</span>
+              <span className="font-medium text-sm">Composition Assistant</span>
+            </div>
+            <button onClick={() => setChatOpen(false)} className="text-white/80 hover:text-white text-sm">
+              Close
+            </button>
+          </div>
+
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+            {chatMessages.map((msg, idx) => (
+              <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={`max-w-[85%] text-sm rounded-lg px-3 py-2 ${
+                    msg.role === "user"
+                      ? "bg-[var(--accent)] text-white rounded-br-none"
+                      : "bg-zinc-100 text-zinc-800 rounded-bl-none"
+                  }`}
+                >
+                  {msg.content}
+                </div>
+              </div>
+            ))}
+            {chatLoading && (
+              <div className="flex justify-start">
+                <div className="bg-zinc-100 rounded-lg rounded-bl-none px-3 py-2">
+                  <span className="text-sm text-zinc-500">Thinking...</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Input */}
+          <div className="p-3 border-t border-zinc-200 flex-shrink-0">
+            <div className="flex gap-2">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && chatInput.trim()) {
+                    const text = chatInput.trim();
+                    setChatInput("");
+                    setChatMessages((prev) => [...prev, { role: "user", content: text }]);
+                    setChatLoading(true);
+                    fetch("/api/chat", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        message: text,
+                        history: chatMessages,
+                        context: {
+                          eventName: event?.name || "",
+                          sport: event?.sport || "",
+                          city: event?.city || "",
+                          eventDate: event?.eventDate || "",
+                          selectedCount: selectedIds.size,
+                          outputType: outputType || undefined,
+                        },
+                      }),
+                    })
+                      .then((r) => r.json())
+                      .then((data) => {
+                        if (data.success) {
+                          setChatMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
+                        } else {
+                          setChatMessages((prev) => [...prev, { role: "assistant", content: `Error: ${data.error}` }]);
+                        }
+                      })
+                      .catch(() => {
+                        setChatMessages((prev) => [...prev, { role: "assistant", content: "Failed to get response. Please try again." }]);
+                      })
+                      .finally(() => setChatLoading(false));
+                  }
+                }}
+                placeholder="Ask about composition..."
+                className="flex-1 text-sm px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent"
+              />
+              <button
+                onClick={() => {
+                  const text = chatInput.trim();
+                  if (!text) return;
+                  setChatInput("");
+                  setChatMessages((prev) => [...prev, { role: "user", content: text }]);
+                  setChatLoading(true);
+                  fetch("/api/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      message: text,
+                      history: chatMessages,
+                      context: {
+                        eventName: event?.name || "",
+                        sport: event?.sport || "",
+                        city: event?.city || "",
+                        eventDate: event?.eventDate || "",
+                        selectedCount: selectedIds.size,
+                        outputType: outputType || undefined,
+                      },
+                    }),
+                  })
+                    .then((r) => r.json())
+                    .then((data) => {
+                      if (data.success) {
+                        setChatMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
+                      } else {
+                        setChatMessages((prev) => [...prev, { role: "assistant", content: `Error: ${data.error}` }]);
+                      }
+                    })
+                    .catch(() => {
+                      setChatMessages((prev) => [...prev, { role: "assistant", content: "Failed to get response. Please try again." }]);
+                    })
+                    .finally(() => setChatLoading(false));
+                }}
+                disabled={chatLoading || !chatInput.trim()}
+                className="px-3 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chat toggle button */}
+      {!chatOpen && (
+        <button
+          onClick={() => setChatOpen(true)}
+          className="fixed bottom-6 right-6 w-14 h-14 bg-[var(--accent)] text-white rounded-full shadow-lg hover:bg-[var(--accent-hover)] flex items-center justify-center z-40"
+          title="Composition Assistant"
+        >
+          <span className="text-2xl">🤖</span>
+        </button>
       )}
     </div>
   );
