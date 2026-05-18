@@ -1,0 +1,200 @@
+{
+  "project": "GIS MVP - Girls In Sports Media Catalog & AI Marketing Composer",
+  "branchName": "clawdy/gis-media-mvp",
+  "description": "Next.js PWA on port 3010 that leverages Immich for media storage/distribution. AI-orchestrated marketing material creation using LLM planning + ffmpeg/media tools to compose collages and videos from existing camp media. Includes feedback loop via positive/negative example albums for future prompt improvement. Directors upload via Immich; GIS app handles catalog, selection, AI analysis, composition, and results.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Project Bootstrap — Next.js + Prisma + PostgreSQL on port 3010",
+      "description": "As a developer, I want the GIS app scaffolded with the same Next.js/Prisma stack as DojoMojo so that I have a consistent, familiar foundation.",
+      "acceptanceCriteria": [
+        "Next.js 14+ app initialized and running on port 3010",
+        "Prisma schema file exists with PostgreSQL datasource configured",
+        "Database connection succeeds on startup",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented. Next.js 14.2.35, React 18, Prisma 7.8.0 with @prisma/adapter-pg, Tailwind 3.4.1. Schema includes Event, GeneratedAsset, FeedbackRating. PostgreSQL database girlsinsports synced. Build passes, tsc clean. Committed as 5428390."
+    },
+    {
+      "id": "US-002",
+      "title": "Static Auth Gateway",
+      "description": "As a director, I want a simple login gate so that the app is protected without complex auth for MVP, while the architecture supports upgrading to full auth later.",
+      "acceptanceCriteria": [
+        "Login page exists with static username/password (env-configured)",
+        "Authenticated sessions persist via HTTP-only cookie",
+        "All routes behind the gateway redirect unauthenticated users to login",
+        "Auth middleware is modular — easily swappable for full OAuth/NextAuth later",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Static auth for MVP only. Design middleware interface so NextAuth/Clerk can drop in later."
+    },
+    {
+      "id": "US-003",
+      "title": "Immich Integration — Album & Asset Discovery",
+      "description": "As a director, I want the GIS app to discover and display Immich albums and assets so that I can browse all camp media uploaded via the Immich mobile app.",
+      "acceptanceCriteria": [
+        "Immich server URL and API key are configurable via environment variables",
+        "App fetches albums from Immich API and displays them in the GIS UI",
+        "Albums are mapped to GIS events via metadata (event name, sport, city, date)",
+        "App fetches asset thumbnails and metadata (file type, dimensions, upload date) from Immich",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "GIS app creates albums via Immich API; directors upload to those albums via Immich mobile app."
+    },
+    {
+      "id": "US-004",
+      "title": "Event Catalog & Media Browser",
+      "description": "As a director, I want to browse media by GIS event with filtering so that I can quickly find relevant photos and videos.",
+      "acceptanceCriteria": [
+        "Event list page displays all GIS events with thumbnail previews",
+        "Event detail page shows all associated media in a responsive grid",
+        "Filters available: sport, city, date range, file type (image/video)",
+        "Media grid supports lazy loading for performance",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Media Selection & Output Type Selection",
+      "description": "As a director, I want to select media and choose an output format so that I can request composed marketing materials.",
+      "acceptanceCriteria": [
+        "Users can multi-select individual media assets with checkboxes",
+        "'Select All' toggle available for the current filtered view",
+        "After selection, user chooses output type: Collage Poster, 15s Highlight Video, or Full Wrap-up Video",
+        "Optional 'Let AI choose the best' toggle that passes all media to the ranking layer",
+        "Selection state persists while navigating within the event",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "AI Layer 1 — Vision Analysis & Best Media Ranking via Venice.ai",
+      "description": "As a director, I want the AI to analyze selected media and rank the best shots so that the final composition uses only high-quality, impactful content.",
+      "acceptanceCriteria": [
+        "App sends selected media (or all, if 'AI choose best' is selected) to Venice.ai vision model",
+        "Vision prompt instructs the model to evaluate: composition, action/motion, faces visible, lighting, emotional impact, relevance to youth sports",
+        "Model returns ranked list of asset IDs with confidence scores and brief justification per asset",
+        "Top-ranked assets are selected for the composition layer",
+        "If manual selection was used, ranking acts as a secondary filter/reordering",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Venice.ai vision model choice TBD during implementation. Fallback: use all selected media if vision call fails."
+    },
+    {
+      "id": "US-007",
+      "title": "AI Layer 2 — Composition Script Generation via Venice.ai LLM",
+      "description": "As a director, I want the AI to plan the composition (layout, order, cuts, transitions, captions) so that the final output tells a compelling story about the event.",
+      "acceptanceCriteria": [
+        "App sends ranked media list + event metadata + output type to Venice.ai text model",
+        "LLM returns a structured composition script: for collages — grid layout, image positions, caption text; for videos — clip order, durations, transitions, music tempo suggestion",
+        "Script includes branded captions (event name, sport, city, date) styled appropriately",
+        "Script is validated against available media before execution",
+        "User can review and edit the generated script before execution",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "LLM is the 'director' — it plans, does not generate pixels."
+    },
+    {
+      "id": "US-008",
+      "title": "Media Composition Engine — ffmpeg + Image Tools Execution",
+      "description": "As a director, I want the app to execute the AI-planned composition using media tools so that I receive a polished final file.",
+      "acceptanceCriteria": [
+        "Server-side composition engine accepts a composition script and source media files",
+        "For Collage Posters: uses image manipulation library (sharp/libvips or Pillow) to crop, resize, arrange images per script, overlay text/captions, apply branded color borders",
+        "For Videos: uses ffmpeg to concatenate clips, apply transitions, add text overlays, match durations to script, output MP4 at appropriate resolution",
+        "Composition runs asynchronously with progress tracking",
+        "Failed compositions surface readable error logs",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "ffmpeg and sharp must be installed on the server. Consider job queue (Bull/BullMQ or in-memory) for async processing."
+    },
+    {
+      "id": "US-009",
+      "title": "Results Catalog & Immich Upload",
+      "description": "As a director, I want generated marketing materials saved to Immich and browsable in the app so that I can download them via the Immich mobile app.",
+      "acceptanceCriteria": [
+        "Generated files are uploaded to a dedicated 'GIS Generated' album in Immich via server-side API",
+        "Generated assets are cataloged in the app's database with metadata: source event, output type, composition script used, generation date",
+        "Results page displays all generated materials with preview thumbnails from Immich",
+        "Each result includes: download link (via Immich), event info, output type, created date",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Results Download & Preview",
+      "description": "As a director, I want to preview and download generated files from the GIS app so that I can share them immediately.",
+      "acceptanceCriteria": [
+        "Preview available for images (thumbnail) and videos (first frame + play indicator)",
+        "Download button streams the file from Immich to the user's browser",
+        "File downloads with descriptive filename including event and output type",
+        "Mobile users see a note: 'Also available in your Immich app for mobile download'",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Feedback Loop — Positive & Negative Example Albums",
+      "description": "As a director, after reviewing a generated result, I want to mark source media as 'good' or 'not suitable' so that the system learns and improves future AI selections.",
+      "acceptanceCriteria": [
+        "After viewing a generated result, user can rate the source media used: thumbs-up (positive example) or thumbs-down (negative example)",
+        "Positive-rated media are copied to a hidden 'GIS Positive Examples' album in Immich",
+        "Negative-rated media are copied to a hidden 'GIS Negative Examples' album in Immich",
+        "Ratings are stored in the app's database linked to the media asset ID, event, generation job, and user feedback timestamp",
+        "Future vision analysis prompts can optionally reference positive/negative examples to improve ranking accuracy (feature-flagged for post-MVP)",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "These albums are primarily for backend ML/training data. User sees simple thumbs up/down after generation. Post-MVP: use example albums to refine vision prompts dynamically."
+    },
+    {
+      "id": "US-012",
+      "title": "AI Assistant Chat for Composition Guidance",
+      "description": "As a director, I want an AI chat assistant to help me craft better output requests and clarify options so that I get higher-quality marketing output.",
+      "acceptanceCriteria": [
+        "Chat panel available on the generation page",
+        "User can ask the assistant for help with output type recommendations, composition ideas, or media selection tips",
+        "Assistant has context of the current event, selected media count, and available output types",
+        "Assistant responses are streamed via Venice.ai text model",
+        "Chat history is session-scoped (not persisted)",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
