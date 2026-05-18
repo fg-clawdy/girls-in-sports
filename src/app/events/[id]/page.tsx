@@ -725,16 +725,7 @@ export default function EventPage() {
                   )}
                 </div>
 
-                <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4 mb-4 overflow-x-auto">
-                  <p className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wide">
-                    Raw Script JSON
-                  </p>
-                  <pre className="text-xs text-zinc-700 whitespace-pre-wrap">
-                    {JSON.stringify(compositionScript, null, 2)}
-                  </pre>
-                </div>
-
-                <div className="flex gap-3">
+                <div className="flex gap-3 mb-4">
                   <button
                     onClick={() => setShowScriptPanel(false)}
                     className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
@@ -771,6 +762,15 @@ export default function EventPage() {
                   >
                     {compositionLoading ? "Processing..." : "Execute Composition"}
                   </button>
+                </div>
+
+                <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4 mb-4 overflow-x-auto">
+                  <p className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wide">
+                    Raw Script JSON
+                  </p>
+                  <pre className="text-xs text-zinc-700 whitespace-pre-wrap">
+                    {JSON.stringify(compositionScript, null, 2)}
+                  </pre>
                 </div>
               </>
             )}

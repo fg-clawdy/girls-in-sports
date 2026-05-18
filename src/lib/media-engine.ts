@@ -17,12 +17,14 @@ async function ensureDir(dir: string) {
 }
 
 function getAssetOriginalUrl(assetId: string): string {
-  return `${IMMICH_URL}/api/assets/${assetId}/original?key=${IMMICH_KEY}`;
+  return `${IMMICH_URL}/api/assets/${assetId}/original`;
 }
 
 async function downloadAsset(assetId: string, destPath: string): Promise<string> {
   const url = getAssetOriginalUrl(assetId);
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    headers: { "x-api-key": IMMICH_KEY },
+  });
   if (!res.ok) {
     throw new Error(`Failed to download asset ${assetId}: ${res.status}`);
   }
