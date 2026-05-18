@@ -183,7 +183,7 @@ export async function analyzeMediaWithVision(
     throw new Error("Vision analysis not configured. Set VISION_API_URL and VISION_API_KEY.");
   }
 
-  const maxImages = options?.maxImages || 8;
+  const maxImages = options?.maxImages || 3;
   const limitedUrls = assetUrls.slice(0, maxImages);
 
   // Fetch all images concurrently

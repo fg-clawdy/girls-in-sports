@@ -27,7 +27,7 @@ export async function POST(request: Request) {
 
     if (isVisionConfigured()) {
       result = await analyzeMediaWithVision(assetUrls, {
-        maxImages: 8, // Reasonable limit for token budgets
+        maxImages: 3, // Venice z-ai-glm-5v-turbo reliably handles up to 3 images
       });
     } else {
       // Fallback: return all assets in original order
@@ -44,13 +44,16 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Vision analysis error:", error);
+    const errMsg = error instanceof Error ? error.message : "Analysis failed";
+    const isSpendLimit = errMsg.includes("spend limit") || errMsg.includes("402");
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "Analysis failed",
+        error: errMsg,
+        isSpendLimit,
         scores: [],
         topIds: assetIds.slice(0, 10),
       },
-      { status: 500 }
+      { status: isSpendLimit ? 402 : 500 }
     );
   }
 }
