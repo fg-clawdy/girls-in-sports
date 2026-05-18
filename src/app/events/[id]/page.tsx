@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 
@@ -64,6 +64,11 @@ export default function EventPage() {
   ]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+
+  // Upload state
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchEventData = useCallback(async () => {
     try {
@@ -141,6 +146,42 @@ export default function EventPage() {
     setLetAiChoose(false);
   };
 
+  const handleUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setUploadProgress(0);
+    try {
+      const formData = new FormData();
+      for (let i = 0; i < files.length; i++) {
+        formData.append("files", files[i]);
+      }
+      const res = await fetch(`/api/events/${id}/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "Upload failed");
+      } else {
+        await fetchEventData();
+      }
+    } catch {
+      alert("Upload error");
+    } finally {
+      setUploading(false);
+      setUploadProgress(0);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    handleUpload(e.dataTransfer.files);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
   const handleCompose = async () => {
     if (selectedIds.size === 0 && !letAiChoose) return;
 
@@ -206,7 +247,7 @@ export default function EventPage() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50 pb-28">
+    <div className="min-h-screen bg-zinc-50 pb-28" onDrop={handleDrop} onDragOver={handleDragOver}>
       {/* Header */}
       <header className="bg-white border-b border-zinc-200 px-6 py-4">
         <div className="max-w-6xl mx-auto">
@@ -273,6 +314,28 @@ export default function EventPage() {
             ))}
 
             <div className="w-px h-6 bg-zinc-200 mx-2 hidden sm:block" />
+
+            {/* Upload */}
+            {!selectionMode && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept="image/*,video/*"
+                  className="hidden"
+                  onChange={(e) => handleUpload(e.target.files)}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}
+                  className="px-3 py-1.5 rounded-md text-sm font-medium bg-white text-zinc-700 border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
+                >
+                  {uploading ? "Uploading..." : "+ Upload"}
+                </button>
+                <div className="w-px h-6 bg-zinc-200 mx-2 hidden sm:block" />
+              </>
+            )}
 
             {/* Selection mode toggle */}
             {!selectionMode ? (

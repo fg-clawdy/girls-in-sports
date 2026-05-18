@@ -18,21 +18,62 @@ export default function DashboardPage() {
   const [events, setEvents] = useState<EventItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [showModal, setShowModal] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const [form, setForm] = useState({
+    name: "",
+    sport: "",
+    city: "",
+    eventDate: "",
+    description: "",
+  });
+
+  async function loadEvents() {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/events");
+      const data = await res.json();
+      if (data.events) {
+        setEvents(data.events);
+      }
+      setError("");
+    } catch {
+      setError("Failed to load events");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    fetch("/api/events")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.events) {
-          setEvents(data.events);
-        }
-        setLoading(false);
-      })
-      .catch(() => {
-        setError("Failed to load events");
-        setLoading(false);
-      });
+    loadEvents();
   }, []);
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault();
+    setCreating(true);
+    setCreateError("");
+    try {
+      const res = await fetch("/api/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCreateError(data.error || "Failed to create event");
+        setCreating(false);
+        return;
+      }
+      setShowModal(false);
+      setForm({ name: "", sport: "", city: "", eventDate: "", description: "" });
+      await loadEvents();
+    } catch {
+      setCreateError("Network error");
+    } finally {
+      setCreating(false);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50">
@@ -62,7 +103,7 @@ export default function DashboardPage() {
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-lg font-semibold text-zinc-900">Events</h2>
           <button
-            onClick={() => alert("Event creation coming soon!")}
+            onClick={() => setShowModal(true)}
             className="px-4 py-2 bg-[var(--accent)] text-white text-sm font-medium rounded-md hover:bg-[var(--accent-hover)]"
           >
             + New Event
@@ -118,6 +159,91 @@ export default function DashboardPage() {
           ))}
         </div>
       </main>
+
+      {/* Create Event Modal */}
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-semibold text-zinc-900 mb-4">Create New Event</h3>
+            <form onSubmit={handleCreate} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 mb-1">Event Name</label>
+                <input
+                  required
+                  type="text"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  placeholder="e.g. Summer Camp 2026"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 mb-1">Sport</label>
+                <input
+                  required
+                  type="text"
+                  value={form.sport}
+                  onChange={(e) => setForm({ ...form, sport: e.target.value })}
+                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  placeholder="e.g. Soccer, Basketball"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 mb-1">City</label>
+                <input
+                  required
+                  type="text"
+                  value={form.city}
+                  onChange={(e) => setForm({ ...form, city: e.target.value })}
+                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  placeholder="e.g. Atlanta"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 mb-1">Event Date</label>
+                <input
+                  required
+                  type="date"
+                  value={form.eventDate}
+                  onChange={(e) => setForm({ ...form, eventDate: e.target.value })}
+                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 mb-1">Description</label>
+                <textarea
+                  rows={3}
+                  value={form.description}
+                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  placeholder="Optional notes about the event..."
+                />
+              </div>
+
+              {createError && (
+                <p className="text-sm text-red-600">{createError}</p>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowModal(false)}
+                  className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-900"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creating}
+                  className="px-4 py-2 bg-[var(--accent)] text-white text-sm font-medium rounded-md hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                >
+                  {creating ? "Creating..." : "Create Event"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
