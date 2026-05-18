@@ -10,6 +10,8 @@ import * as fsPromises from "fs/promises";
 import * as pathModule from "path";
 import * as osModule from "os";
 
+import { analyzeVideoAudio, AudioAnalysisResult } from "@/lib/audio-analysis";
+
 // Need these for route code
 const { spawn } = childProcess;
 const { mkdtemp, writeFile, readFile, unlink, rmdir } = fsPromises;
@@ -224,11 +226,11 @@ export async function POST(request: Request) {
     const apiKey = process.env.IMMICH_API_KEY || "";
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 1: Build analysis item list (images = 1 item, videos = N frames)
+    // PHASE 1: Build analysis item list (images = 1 item, videos = N frames + audio)
     // ═══════════════════════════════════════════════════════════════════════
     const analysisItems: AnalysisItem[] = [];
     const assetFrameCounts: Record<string, number> = {};
-    const tempVideoFiles: string[] = [];
+    const audioResults: Record<string, AudioAnalysisResult> = {};
 
     for (const id of assetIds) {
       const type = assetTypes[id] || "IMAGE";
@@ -243,12 +245,18 @@ export async function POST(request: Request) {
         assetFrameCounts[id] = frameCount;
 
         try {
-          // Download video, extract frames, cleanup
+          // Download video once, use for both frame extraction + audio analysis
           const videoUrl = getAssetOriginalUrl(id);
           const localPath = await downloadVideoToTemp(videoUrl, apiKey);
-          tempVideoFiles.push(localPath);
 
-          const frames = await extractVideoFrames(localPath, id, duration);
+          // Run vision frame extraction + audio STT in parallel
+          const [frames, audioResult] = await Promise.all([
+            extractVideoFrames(localPath, id, duration),
+            analyzeVideoAudio(localPath, id),
+          ]);
+
+          audioResults[id] = audioResult;
+
           for (const frame of frames) {
             analysisItems.push({
               assetId: frame.assetId,
@@ -260,20 +268,29 @@ export async function POST(request: Request) {
             });
           }
 
-          // Remove temp video file immediately after frame extraction
+          // Remove temp video file immediately after both extractions
           await unlink(localPath).catch(() => {});
         } catch (err: any) {
-          console.error(`Frame extraction failed for video ${id}:`, err.message);
-          // Fallback: use thumbnail as single frame
+          console.error(`Video analysis failed for ${id}:`, err.message);
+          // Fallback: use thumbnail as single frame, no audio
           assetFrameCounts[id] = 1;
           analysisItems.push({
             assetId: id,
             url: getAssetThumbnailUrl(id),
             isFrame: false,
           });
+          audioResults[id] = {
+            assetId: id,
+            transcript: "",
+            segments: [],
+            audioScore: 0,
+            keywordHits: [],
+            keywordCount: 0,
+            error: err instanceof Error ? err.message : "Analysis failed",
+          };
         }
       } else {
-        // Image: single item
+        // Image: single item, no audio
         assetFrameCounts[id] = 1;
         analysisItems.push({
           assetId: id,
@@ -281,11 +298,6 @@ export async function POST(request: Request) {
           isFrame: false,
         });
       }
-    }
-
-    // Cleanup any orphaned temp files
-    for (const tmpFile of tempVideoFiles) {
-      await unlink(tmpFile).catch(() => {});
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -373,7 +385,7 @@ export async function POST(request: Request) {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 3: Compute final weighted scores
+    // PHASE 3: Compute final weighted scores (vision + audio blend)
     // ═══════════════════════════════════════════════════════════════════════
     const finalScores: {
       assetId: string;
@@ -382,23 +394,49 @@ export async function POST(request: Request) {
       reasons: string[];
       framesAnalyzed: number;
       weighting: string;
+      audioScore?: number;
+      transcriptPreview?: string;
+      keywordHits?: string[];
     }[] = [];
+
+    // Vision + Audio blending weights
+    const VISION_WEIGHT = 0.7;
+    const AUDIO_WEIGHT = 0.3;
 
     for (const [id, data] of Array.from(accumulator)) {
       if (data.weightSum > 0) {
-        const weightedAvg = data.weightedScoreSum / data.weightSum;
+        const visionScore = data.weightedScoreSum / data.weightSum;
+        const audioResult = audioResults[id];
+        const hasAudio = audioResult && audioResult.audioScore > 0;
+
+        let blendedScore = visionScore;
+        let weightingNote: string;
+
+        if (hasAudio) {
+          blendedScore = visionScore * VISION_WEIGHT + audioResult.audioScore * AUDIO_WEIGHT;
+          weightingNote = `Vision ${(VISION_WEIGHT * 100).toFixed(0)}% + Audio ${(AUDIO_WEIGHT * 100).toFixed(0)}% — ${audioResult.keywordCount} keyword hits`;
+        } else {
+          weightingNote = `Vision-only (no audio data)`;
+        }
+
         const uniqueReasons = Array.from(new Set(data.reasons)).slice(0, 5);
         const frameCount = assetFrameCounts[id] || data.frameCount;
+
+        // If audio keywords found, add them as a reason
+        if (hasAudio && audioResult.keywordHits.length > 0) {
+          uniqueReasons.push(`Audio: ${audioResult.keywordHits.slice(0, 3).join(", ")}`);
+        }
+
         finalScores.push({
           assetId: id,
-          score: Math.round(weightedAvg),
+          score: Math.round(blendedScore),
           rank: 0,
-          reasons: uniqueReasons,
+          reasons: uniqueReasons.slice(0, 5),
           framesAnalyzed: frameCount,
-          weighting:
-            frameCount > 1
-              ? `Weighted mean: edge frames ×0.7, core frames ×1.0 (${data.frameCount} frames across ${data.batchCount} batch${data.batchCount !== 1 ? "es" : ""})`
-              : "Single-frame analysis (thumbnail)",
+          weighting: frameCount > 1 ? `Weighted mean: edge frames ×0.7, core frames ×1.0. ${weightingNote}` : `Single-frame. ${weightingNote}`,
+          audioScore: hasAudio ? audioResult.audioScore : undefined,
+          transcriptPreview: hasAudio ? audioResult.transcript.slice(0, 80) + (audioResult.transcript.length > 80 ? "..." : "") : undefined,
+          keywordHits: hasAudio ? audioResult.keywordHits : undefined,
         });
       }
     }

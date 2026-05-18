@@ -63,6 +63,9 @@ export default function EventPage() {
       reasons: string[];
       framesAnalyzed?: number;
       weighting?: string;
+      audioScore?: number;
+      transcriptPreview?: string;
+      keywordHits?: string[];
     }>;
     topIds: string[];
     modelUsed: string;
@@ -714,7 +717,29 @@ export default function EventPage() {
                                 1 frame
                               </span>
                             )}
+                            {score.audioScore !== undefined && score.audioScore > 0 && (
+                              <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">
+                                Audio: {score.audioScore}/100
+                              </span>
+                            )}
                           </div>
+                          {score.transcriptPreview && (
+                            <p className="text-[11px] text-zinc-500 mb-1 italic leading-tight">
+                              &ldquo;{score.transcriptPreview}&rdquo;
+                            </p>
+                          )}
+                          {score.keywordHits && score.keywordHits.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mb-1">
+                              {score.keywordHits.slice(0, 4).map((kw, i) => (
+                                <span
+                                  key={i}
+                                  className="text-[10px] px-1.5 py-0.5 bg-purple-50 text-purple-600 rounded-full border border-purple-100"
+                                >
+                                  {kw}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                           {score.weighting && (
                             <p className="text-[11px] text-zinc-400 mb-1.5 leading-tight">
                               {score.weighting}
