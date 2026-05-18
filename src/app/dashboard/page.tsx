@@ -40,16 +40,21 @@ export default function DashboardPage() {
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold text-zinc-900">Girls In Sports</h1>
-            <p className="text-sm text-zinc-500">Media Catalog &amp; Marketing Composer</p>
+            <p className="text-sm text-zinc-500">Media Catalog & Marketing Composer</p>
           </div>
-          <form action="/api/auth/logout" method="POST">
-            <button
-              type="submit"
-              className="text-sm text-zinc-600 hover:text-zinc-900"
-            >
-              Log Out
-            </button>
-          </form>
+          <div className="flex items-center gap-4">
+            <Link href="/results" className="text-sm text-zinc-600 hover:text-zinc-900">
+              Results Catalog
+            </Link>
+            <form action="/api/auth/logout" method="POST">
+              <button
+                type="submit"
+                className="text-sm text-zinc-600 hover:text-zinc-900"
+              >
+                Log Out
+              </button>
+            </form>
+          </div>
         </div>
       </header>
 
