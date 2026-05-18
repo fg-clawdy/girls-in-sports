@@ -73,6 +73,7 @@ export async function getAllAlbums(): Promise<ImmichAlbum[]> {
 export async function getAlbum(albumId: string): Promise<ImmichAlbum> {
   const res = await fetch(`${IMMICH_URL}/api/albums/${albumId}?withoutAssets=false`, {
     headers: getHeaders(),
+    cache: "no-store",
   });
   if (!res.ok) {
     throw new Error(`Immich album fetch failed: ${res.status} ${res.statusText}`);

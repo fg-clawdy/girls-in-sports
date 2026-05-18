@@ -81,7 +81,7 @@ export default function EventPage() {
       setEvent(eventData.event);
 
       if (eventData.event.immichAlbumId) {
-        const albumRes = await fetch(`/api/immich/albums/${eventData.event.immichAlbumId}`);
+        const albumRes = await fetch(`/api/immich/albums/${eventData.event.immichAlbumId}`, { cache: "no-store" });
         if (albumRes.ok) {
           const albumData = await albumRes.json();
           setAlbum(albumData.album);
