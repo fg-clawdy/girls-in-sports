@@ -36,9 +36,14 @@ export async function POST(
 
     for (const file of files) {
       try {
-        // Upload to Immich
+        // Upload to Immich with required metadata
+        const now = new Date().toISOString();
         const immichForm = new FormData();
         immichForm.append("assetData", new Blob([await file.arrayBuffer()], { type: file.type }), file.name);
+        immichForm.append("deviceAssetId", `${file.name}-${Date.now()}`);
+        immichForm.append("deviceId", "gis-web-upload");
+        immichForm.append("fileCreatedAt", now);
+        immichForm.append("fileModifiedAt", now);
 
         const uploadRes = await fetch(`${IMMICH_URL}/api/assets`, {
           method: "POST",

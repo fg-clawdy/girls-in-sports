@@ -162,6 +162,8 @@ export default function EventPage() {
       const data = await res.json();
       if (!res.ok) {
         alert(data.error || "Upload failed");
+      } else if (data.errors && data.errors.length > 0) {
+        alert(`Upload completed with ${data.errors.length} error(s):\n${data.errors.join("\n")}`);
       } else {
         await fetchEventData();
       }
