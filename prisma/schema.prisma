@@ -1,0 +1,75 @@
+// Girls In Sports - Prisma Schema
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  name        String
+  sport       String
+  city        String
+  eventDate   DateTime
+  description String?
+  immichAlbumId String? // References Immich album
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  generatedAssets GeneratedAsset[]
+  feedbackRatings FeedbackRating[]
+
+  @@map("events")
+}
+
+model GeneratedAsset {
+  id           String      @id @default(cuid())
+  eventId      String
+  event        Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  outputType   OutputType
+  fileName     String
+  filePath     String
+  immichAssetId String?    // References Immich asset
+  compositionScript String? @db.Text
+  status       GenerationStatus @default(PENDING)
+  errorMessage String?
+  createdAt    DateTime    @default(now())
+  completedAt  DateTime?
+
+  feedbackRatings FeedbackRating[]
+
+  @@map("generated_assets")
+}
+
+model FeedbackRating {
+  id         String        @id @default(cuid())
+  eventId    String
+  event      Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sourceAssetId String     // Immich asset ID of the source media
+  generatedAssetId String?
+  generatedAsset GeneratedAsset? @relation(fields: [generatedAssetId], references: [id], onDelete: SetNull)
+  rating     RatingType
+  createdAt  DateTime      @default(now())
+
+  @@map("feedback_ratings")
+}
+
+enum OutputType {
+  COLLAGE_POSTER
+  HIGHLIGHT_VIDEO_15S
+  WRAP_UP_VIDEO
+}
+
+enum GenerationStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+enum RatingType {
+  POSITIVE
+  NEGATIVE
+}
