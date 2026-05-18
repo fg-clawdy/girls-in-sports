@@ -60,6 +60,8 @@ export default function EventPage() {
     topIds: string[];
     modelUsed: string;
     visionConfigured: boolean;
+    error?: string;
+    isSpendLimit?: boolean;
   } | null>(null);
   const [rankingLoading, setRankingLoading] = useState(false);
   const [showRankingPanel, setShowRankingPanel] = useState(false);
@@ -229,19 +231,25 @@ export default function EventPage() {
           setSelectedIds(new Set(data.topIds));
         }
       } else {
+        // Server returned an error response — preserve the actual visionConfigured flag
         setRanking({
           scores: [],
           topIds: idsToRank.slice(0, 10),
-          modelUsed: "error-fallback",
-          visionConfigured: false,
+          modelUsed: data.modelUsed || "error-fallback",
+          visionConfigured: data.visionConfigured ?? false,
+          error: data.error,
+          isSpendLimit: data.isSpendLimit,
         });
       }
     } catch {
+      // Network / parsing error — we don't know if vision is configured, assume true
+      // since it's configured on the server and this is likely a transient issue
       setRanking({
         scores: [],
         topIds: Array.from(selectedIds).slice(0, 10),
         modelUsed: "error-fallback",
-        visionConfigured: false,
+        visionConfigured: true,
+        error: "Network error — please retry",
       });
     } finally {
       setRankingLoading(false);
@@ -515,16 +523,46 @@ export default function EventPage() {
               </div>
             )}
 
+                {/* Error / Status notification */}
+                {ranking && (
+                  <>
+                    {!ranking.visionConfigured && (
+                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+                        <p className="text-sm text-amber-800 font-medium">
+                          Vision AI not configured
+                        </p>
+                        <p className="text-xs text-amber-700 mt-0.5">
+                          Set VISION_API_URL and VISION_API_KEY in .env to enable AI analysis.
+                        </p>
+                      </div>
+                    )}
+
+                    {ranking.visionConfigured && ranking.error && (
+                      <div className={`border rounded-lg p-3 mb-4 ${
+                        ranking.isSpendLimit
+                          ? "bg-orange-50 border-orange-200"
+                          : "bg-red-50 border-red-200"
+                      }`}>
+                        <p className={`text-sm font-medium ${
+                          ranking.isSpendLimit ? "text-orange-800" : "text-red-800"
+                        }`}>
+                          {ranking.isSpendLimit ? "⚠ Spend limit reached" : "AI analysis failed"}
+                        </p>
+                        <p className={`text-xs mt-0.5 ${
+                          ranking.isSpendLimit ? "text-orange-700" : "text-red-700"
+                        }`}>
+                          {ranking.error}
+                          {ranking.isSpendLimit && (
+                            <> — <a href="https://venice.ai/settings/billing" target="_blank" rel="noopener" className="underline">Add credits on Venice.ai</a></>
+                          )}
+                        </p>
+                      </div>
+                    )}
+                  </>
+                )}
+
             {!rankingLoading && ranking && (
               <>
-                {!ranking.visionConfigured && (
-                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-                    <p className="text-sm text-amber-800">
-                      Vision AI not configured. Using default ranking.
-                      Set VISION_API_URL and VISION_API_KEY in .env to enable AI analysis.
-                    </p>
-                  </div>
-                )}
 
                 {ranking.scores.length > 0 && (
                   <div className="space-y-3 mb-6">

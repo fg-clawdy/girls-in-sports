@@ -26,9 +26,24 @@ export async function POST(request: Request) {
     let result;
 
     if (isVisionConfigured()) {
-      result = await analyzeMediaWithVision(assetUrls, {
-        maxImages: 3, // Venice z-ai-glm-5v-turbo reliably handles up to 3 images
-      });
+      try {
+        result = await analyzeMediaWithVision(assetUrls, {
+          maxImages: 3,
+        });
+      } catch (err: any) {
+        const errMsg = err instanceof Error ? err.message : "Vision analysis failed";
+        const isSpendLimit = errMsg.includes("spend limit") || errMsg.includes("402");
+        return NextResponse.json(
+          {
+            error: errMsg,
+            isSpendLimit,
+            scores: [],
+            topIds: assetIds.slice(0, 10),
+            visionConfigured: true,
+          },
+          { status: isSpendLimit ? 402 : 500 }
+        );
+      }
     } else {
       // Fallback: return all assets in original order
       result = fallbackRanking(assetIds);
@@ -45,15 +60,14 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Vision analysis error:", error);
     const errMsg = error instanceof Error ? error.message : "Analysis failed";
-    const isSpendLimit = errMsg.includes("spend limit") || errMsg.includes("402");
     return NextResponse.json(
       {
         error: errMsg,
-        isSpendLimit,
         scores: [],
         topIds: assetIds.slice(0, 10),
+        visionConfigured: isVisionConfigured(),
       },
-      { status: isSpendLimit ? 402 : 500 }
+      { status: 500 }
     );
   }
 }
