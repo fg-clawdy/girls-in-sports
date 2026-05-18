@@ -54,6 +54,9 @@ export default function EventPage() {
   } | null>(null);
   const [rankingLoading, setRankingLoading] = useState(false);
   const [showRankingPanel, setShowRankingPanel] = useState(false);
+  const [compositionScript, setCompositionScript] = useState<any>(null);
+  const [compositionLoading, setCompositionLoading] = useState(false);
+  const [showScriptPanel, setShowScriptPanel] = useState(false);
 
   const fetchEventData = useCallback(async () => {
     try {
@@ -493,14 +496,161 @@ export default function EventPage() {
               </button>
               <button
                 disabled={!outputType}
-                onClick={() => {
-                  alert(`Starting ${outputType} with ${selectedIds.size} assets... (AI composition coming in US-006/007)`);
+                onClick={async () => {
+                  setCompositionLoading(true);
+                  setShowOutputPanel(false);
+                  setShowScriptPanel(true);
+
+                  const selectedAssets = filteredAssets.filter((a) => selectedIds.has(a.id));
+
+                  try {
+                    const res = await fetch("/api/ai/composition", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        event: {
+                          name: event?.name,
+                          sport: event?.sport,
+                          city: event?.city,
+                          eventDate: event?.eventDate,
+                          description: event?.description,
+                        },
+                        assets: selectedAssets.map((a) => ({
+                          assetId: a.id,
+                          fileName: a.originalFileName,
+                          type: a.type === "VIDEO" ? "VIDEO" : "IMAGE",
+                          aiScore: ranking?.scores?.find((s) => s.assetId === a.id)?.score,
+                          aiReasons: ranking?.scores?.find((s) => s.assetId === a.id)?.reasons,
+                        })),
+                        outputType,
+                      }),
+                    });
+
+                    const data = await res.json();
+                    if (data.success) {
+                      setCompositionScript(data.script);
+                    } else {
+                      setCompositionScript({ type: "error", message: data.error });
+                    }
+                  } catch {
+                    setCompositionScript({ type: "error", message: "Failed to generate composition" });
+                  } finally {
+                    setCompositionLoading(false);
+                  }
                 }}
                 className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                Start Composition
+                {compositionLoading ? "Generating..." : "Start Composition"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Composition Script Review Panel */}
+      {showScriptPanel && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setShowScriptPanel(false)}
+          />
+          <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-2xl max-h-[85vh] overflow-y-auto p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-zinc-900">Composition Script</h2>
+              {compositionLoading && (
+                <span className="text-sm text-zinc-500 animate-pulse">Generating...</span>
+              )}
+            </div>
+
+            {compositionLoading && !compositionScript && (
+              <div className="text-center py-8">
+                <div className="w-8 h-8 border-2 border-zinc-200 border-t-[var(--accent)] rounded-full animate-spin mx-auto mb-3" />
+                <p className="text-sm text-zinc-500">AI is planning your composition...</p>
+                <p className="text-xs text-zinc-400 mt-1">Layout, order, captions, and transitions</p>
+              </div>
+            )}
+
+            {!compositionLoading && compositionScript?.type === "error" && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+                <p className="text-sm text-red-700 font-medium">Error</p>
+                <p className="text-sm text-red-600 mt-1">{compositionScript.message}</p>
+              </div>
+            )}
+
+            {!compositionLoading && compositionScript && compositionScript.type !== "error" && (
+              <>
+                <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4 mb-4">
+                  <h3 className="font-semibold text-zinc-900 mb-2">
+                    {compositionScript.title || "Untitled Composition"}
+                  </h3>
+                  <p className="text-sm text-zinc-600 mb-3">
+                    {compositionScript.subtitle || ""}
+                  </p>
+
+                  {compositionScript.type === "collage" ? (
+                    <div className="space-y-2">
+                      <p className="text-sm">
+                        <strong className="text-zinc-700">Layout:</strong>{" "}
+                        {compositionScript.layout || "grid"} ({compositionScript.gridCols}x{compositionScript.gridRows})
+                      </p>
+                      <p className="text-sm">
+                        <strong className="text-zinc-700">Dimensions:</strong>{" "}
+                        {compositionScript.dimensions?.width}x{compositionScript.dimensions?.height}px
+                      </p>
+                      <p className="text-sm">
+                        <strong className="text-zinc-700">Images:</strong>{" "}
+                        {compositionScript.images?.length || 0} placed
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-sm">
+                        <strong className="text-zinc-700">Total Duration:</strong>{" "}
+                        {compositionScript.totalDuration}s
+                      </p>
+                      <p className="text-sm">
+                        <strong className="text-zinc-700">Clips:</strong>{" "}
+                        {compositionScript.clips?.length || 0}
+                      </p>
+                      <p className="text-sm">
+                        <strong className="text-zinc-700">Music Tempo:</strong>{" "}
+                        {compositionScript.musicTempo || "none"}
+                      </p>
+                      <p className="text-sm">
+                        <strong className="text-zinc-700">Resolution:</strong>{" "}
+                        {compositionScript.resolution || "1080p"}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4 mb-4 overflow-x-auto">
+                  <p className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wide">
+                    Raw Script JSON
+                  </p>
+                  <pre className="text-xs text-zinc-700 whitespace-pre-wrap">
+                    {JSON.stringify(compositionScript, null, 2)}
+                  </pre>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowScriptPanel(false)}
+                    className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
+                  >
+                    Close
+                  </button>
+                  <button
+                    onClick={() => {
+                      alert("Composition execution coming in US-008!");
+                    }}
+                    className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)]"
+                  >
+                    Execute Composition
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
