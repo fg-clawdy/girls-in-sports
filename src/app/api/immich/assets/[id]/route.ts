@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
-import { getAssetOriginalUrl, isImmichConfigured } from "@/lib/immich";
+
+const IMMICH_URL = process.env.IMMICH_API_URL || "http://localhost:2283";
+const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
+
+function isImmichConfigured(): boolean {
+  return Boolean(IMMICH_URL && IMMICH_KEY);
+}
 
 export async function GET(
   _request: Request,
@@ -10,12 +16,10 @@ export async function GET(
       return NextResponse.json({ error: "Immich not configured" }, { status: 503 });
     }
 
-    const url = getAssetOriginalUrl(params.id);
-
-    const res = await fetch(url, {
+    const res = await fetch(`${IMMICH_URL}/api/assets/${params.id}/original`, {
       headers: {
         Accept: "image/*,video/*",
-        "x-api-key": process.env.IMMICH_API_KEY || "",
+        "x-api-key": IMMICH_KEY,
       },
     });
 
