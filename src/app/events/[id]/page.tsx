@@ -987,7 +987,7 @@ function MediaCard({
       }}
       className={`group relative bg-white rounded-lg border overflow-hidden hover:shadow-md transition-shadow cursor-pointer ${
         selected ? "border-[var(--accent)] ring-2 ring-[var(--accent)]" : "border-zinc-200"
-      }`}>
+      }`}
     >
       {/* Selection checkbox */}
       {selectionMode && (
