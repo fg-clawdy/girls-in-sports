@@ -70,6 +70,9 @@ export default function EventPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Lightbox state
+  const [lightboxAsset, setLightboxAsset] = useState<ImmichAsset | null>(null);
+
   const fetchEventData = useCallback(async () => {
     try {
       const eventRes = await fetch(`/api/events/${id}`);
@@ -409,6 +412,7 @@ export default function EventPage() {
                 selectionMode={selectionMode}
                 selected={selectedIds.has(asset.id)}
                 onToggle={() => toggleSelection(asset.id)}
+                onView={() => setLightboxAsset(asset)}
                 onFeedback={(rating) => {
                   fetch("/api/feedback", {
                     method: "POST",
@@ -902,6 +906,42 @@ export default function EventPage() {
         </div>
       )}
 
+      {/* Lightbox */}
+      {lightboxAsset && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
+          onClick={() => setLightboxAsset(null)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+            {lightboxAsset.type === "VIDEO" ? (
+              <video
+                src={`/api/immich/assets/${lightboxAsset.id}`}
+                controls
+                autoPlay
+                className="max-w-[90vw] max-h-[90vh]"
+              />
+            ) : (
+              <img
+                src={`/api/immich/assets/${lightboxAsset.id}`}
+                alt={lightboxAsset.originalFileName}
+                className="max-w-[90vw] max-h-[90vh] object-contain"
+              />
+            )}
+            <div className="absolute bottom-4 left-0 right-0 text-center">
+              <p className="text-white/80 text-sm bg-black/50 inline-block px-3 py-1 rounded-full">
+                {lightboxAsset.originalFileName}
+              </p>
+            </div>
+            <button
+              onClick={() => setLightboxAsset(null)}
+              className="absolute top-2 right-2 text-white/80 hover:text-white bg-black/50 hover:bg-black/70 rounded-full w-8 h-8 flex items-center justify-center"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Chat toggle button */}
       {!chatOpen && (
         <button
@@ -921,6 +961,7 @@ function MediaCard({
   selectionMode,
   selected,
   onToggle,
+  onView,
   onFeedback,
   feedback,
 }: {
@@ -928,6 +969,7 @@ function MediaCard({
   selectionMode: boolean;
   selected: boolean;
   onToggle: () => void;
+  onView: () => void;
   onFeedback?: (rating: "POSITIVE" | "NEGATIVE") => void;
   feedback?: "POSITIVE" | "NEGATIVE" | null;
 }) {
@@ -936,10 +978,16 @@ function MediaCard({
 
   return (
     <div
-      onClick={() => selectionMode && onToggle()}
-      className={`group relative bg-white rounded-lg border overflow-hidden hover:shadow-md transition-shadow ${
+      onClick={() => {
+        if (selectionMode) {
+          onToggle();
+        } else {
+          onView();
+        }
+      }}
+      className={`group relative bg-white rounded-lg border overflow-hidden hover:shadow-md transition-shadow cursor-pointer ${
         selected ? "border-[var(--accent)] ring-2 ring-[var(--accent)]" : "border-zinc-200"
-      } ${selectionMode ? "cursor-pointer" : ""}`}
+      }`}>
     >
       {/* Selection checkbox */}
       {selectionMode && (

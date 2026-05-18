@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAssetThumbnailUrl, isImmichConfigured } from "@/lib/immich";
+import { getAssetOriginalUrl, isImmichConfigured } from "@/lib/immich";
 
 export async function GET(
   _request: Request,
@@ -10,18 +10,18 @@ export async function GET(
       return NextResponse.json({ error: "Immich not configured" }, { status: 503 });
     }
 
-    const url = getAssetThumbnailUrl(params.id);
+    const url = getAssetOriginalUrl(params.id);
 
     const res = await fetch(url, {
       headers: {
-        Accept: "image/*",
+        Accept: "image/*,video/*",
         "x-api-key": process.env.IMMICH_API_KEY || "",
       },
     });
 
     if (!res.ok) {
       return NextResponse.json(
-        { error: "Thumbnail fetch failed" },
+        { error: "Asset fetch failed" },
         { status: res.status }
       );
     }
@@ -30,12 +30,12 @@ export async function GET(
 
     return new NextResponse(blob, {
       headers: {
-        "Content-Type": res.headers.get("Content-Type") || "image/jpeg",
+        "Content-Type": res.headers.get("Content-Type") || "application/octet-stream",
         "Cache-Control": "public, max-age=86400",
       },
     });
   } catch (error) {
-    console.error("Thumbnail proxy error:", error);
-    return NextResponse.json({ error: "Failed to fetch thumbnail" }, { status: 500 });
+    console.error("Asset proxy error:", error);
+    return NextResponse.json({ error: "Failed to fetch asset" }, { status: 500 });
   }
 }
