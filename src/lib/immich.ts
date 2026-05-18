@@ -104,15 +104,15 @@ export async function createAlbum(
 // --- Assets ---
 
 export function getAssetThumbnailUrl(assetId: string): string {
-  return `${IMMICH_URL}/api/assets/${assetId}/thumbnail?size=thumbnail&key=${IMMICH_KEY}`;
+  return `${IMMICH_URL}/api/assets/${assetId}/thumbnail?size=thumbnail`;
 }
 
 export function getAssetPreviewUrl(assetId: string): string {
-  return `${IMMICH_URL}/api/assets/${assetId}/thumbnail?size=preview&key=${IMMICH_KEY}`;
+  return `${IMMICH_URL}/api/assets/${assetId}/thumbnail?size=preview`;
 }
 
 export function getAssetOriginalUrl(assetId: string): string {
-  return `${IMMICH_URL}/api/assets/${assetId}/original?key=${IMMICH_KEY}`;
+  return `${IMMICH_URL}/api/assets/${assetId}/original`;
 }
 
 export async function getAssetInfo(assetId: string): Promise<ImmichAsset> {
