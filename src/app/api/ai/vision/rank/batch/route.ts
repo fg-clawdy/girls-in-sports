@@ -17,13 +17,14 @@ const path = pathModule;
 const os = osModule;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// BATCH VISION RANKING — All media analyzed, videos sampled at 1 frame / 1.5s
+// BATCH VISION RANKING — Variable frame density: dense in core, sparse at edges
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const BATCH_SIZE = 3;
-const SECONDS_PER_FRAME = 1.5;
+const EDGE_SECONDS_PER_FRAME = 2.0;   // Slower sampling at edges (intro/outro)
+const CORE_SECONDS_PER_FRAME = 1.0;   // Faster sampling in core content
 const MIN_VIDEO_FRAMES = 3;
-const MAX_VIDEO_FRAMES = 20;
+const MAX_VIDEO_FRAMES = 24;           // Slightly higher cap since core is denser
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -54,26 +55,68 @@ async function downloadVideoToTemp(videoUrl: string, apiKey: string): Promise<st
  * Extract frames from a local video file using ffmpeg.
  * Returns frame items with data URLs ready for vision model.
  */
+/**
+ * Extract frames with variable density: more frames in the core (middle 60%),
+ * fewer frames at the edges (first/last 20%). This captures the best content
+ * while avoiding intro/outro noise.
+ */
+function computeVariableDensityTimestamps(durationSec: number): number[] {
+  const edgeStartEnd = durationSec * 0.2; // First and last 20%
+  const coreStart = edgeStartEnd;
+  const coreEnd = durationSec - edgeStartEnd;
+  const coreDuration = coreEnd - coreStart;
+
+  // Calculate how many frames each zone gets
+  const edgeFrameCount = Math.max(1, Math.floor(edgeStartEnd / EDGE_SECONDS_PER_FRAME));
+  const coreFrameCount = Math.max(2, Math.floor(coreDuration / CORE_SECONDS_PER_FRAME));
+
+  // Ensure total doesn't exceed max
+  let totalFrames = edgeFrameCount * 2 + coreFrameCount;
+  if (totalFrames > MAX_VIDEO_FRAMES) {
+    // Reduce proportionally, but keep at least 2 core frames
+    const scale = MAX_VIDEO_FRAMES / totalFrames;
+    const scaledCore = Math.max(2, Math.floor(coreFrameCount * scale));
+    const remaining = MAX_VIDEO_FRAMES - scaledCore;
+    const scaledEdge = Math.max(1, Math.floor(remaining / 2));
+    totalFrames = scaledEdge * 2 + scaledCore;
+  }
+  if (totalFrames < MIN_VIDEO_FRAMES) {
+    totalFrames = MIN_VIDEO_FRAMES;
+  }
+
+  const timestamps: number[] = [];
+
+  // Edge zone: first 20% (frames spread across 0 to edgeStartEnd)
+  for (let i = 0; i < edgeFrameCount; i++) {
+    const pct = (i + 1) / (edgeFrameCount + 1);
+    timestamps.push(edgeStartEnd * pct * 0.8); // slightly bias away from very start
+  }
+
+  // Core zone: middle 60% (denser sampling)
+  for (let i = 0; i < coreFrameCount; i++) {
+    const pct = (i + 1) / (coreFrameCount + 1);
+    timestamps.push(coreStart + coreDuration * pct);
+  }
+
+  // Edge zone: last 20% (frames spread across coreEnd to duration)
+  for (let i = 0; i < edgeFrameCount; i++) {
+    const pct = (i + 1) / (edgeFrameCount + 1);
+    timestamps.push(coreEnd + edgeStartEnd * pct * 0.2); // slightly bias away from very end
+  }
+
+  return timestamps.sort((a, b) => a - b);
+}
+
 async function extractVideoFrames(
   localVideoPath: string,
   assetId: string,
   durationSec: number
 ): Promise<{ assetId: string; url: string; frameIndex: number; timestamp: number }[]> {
-  // Calculate frame count: 1 frame per SECONDS_PER_FRAME, bounded by min/max
-  const rawCount = Math.floor(durationSec / SECONDS_PER_FRAME);
-  const frameCount = Math.min(Math.max(rawCount, MIN_VIDEO_FRAMES), MAX_VIDEO_FRAMES);
+  const timestamps = computeVariableDensityTimestamps(durationSec);
+  const frameCount = timestamps.length;
 
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gis-frames-"));
   const framePaths: string[] = [];
-
-  // Spread timestamps evenly across the video, padding away from edges
-  const edgePad = Math.min(0.5, durationSec * 0.05); // 0.5s or 5% of duration
-  const usableDuration = Math.max(durationSec - edgePad * 2, 1);
-  const timestamps: number[] = [];
-  for (let i = 0; i < frameCount; i++) {
-    const pct = (i + 1) / (frameCount + 1);
-    timestamps.push(edgePad + usableDuration * pct);
-  }
 
   // Extract frames with ffmpeg — use fast seek then accurate decode
   await Promise.all(
@@ -191,10 +234,12 @@ export async function POST(request: Request) {
       const type = assetTypes[id] || "IMAGE";
       if (type === "VIDEO") {
         const duration = assetDurations[id] || 5; // fallback 5s if unknown
-        const frameCount = Math.min(
-          Math.max(Math.floor(duration / SECONDS_PER_FRAME), MIN_VIDEO_FRAMES),
-          MAX_VIDEO_FRAMES
-        );
+        // Estimate frame count using same variable-density logic as extraction
+        const edgeStartEnd = duration * 0.2;
+        const coreDuration = duration - edgeStartEnd * 2;
+        const edgeCount = Math.max(1, Math.floor(edgeStartEnd / EDGE_SECONDS_PER_FRAME));
+        const coreCount = Math.max(2, Math.floor(coreDuration / CORE_SECONDS_PER_FRAME));
+        const frameCount = Math.min(Math.max(edgeCount * 2 + coreCount, MIN_VIDEO_FRAMES), MAX_VIDEO_FRAMES);
         assetFrameCounts[id] = frameCount;
 
         try {
@@ -400,7 +445,8 @@ export async function POST(request: Request) {
       failedBatches,
       totalAssetsAnalyzed: assetIds.length,
       assetFrameCounts,
-      secondsPerFrame: SECONDS_PER_FRAME,
+      samplingStrategy:
+        "Variable density: edge zones (first/last 20%) at 1 frame / 2.0s, core (middle 60%) at 1 frame / 1.0s",
       weightingStrategy:
         "Edge frames (first/last 20%) weighted 0.7×, core frames weighted 1.0×. Scores are weighted averages.",
     });
