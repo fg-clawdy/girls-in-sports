@@ -65,8 +65,18 @@ function encodeImageToBase64(buffer: Buffer): string {
   return buffer.toString("base64");
 }
 
+const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
+
 async function fetchImageFromUrl(url: string): Promise<Buffer> {
-  const res = await fetch(url, { headers: { Accept: "image/*" } });
+  // Strip any ?key= query param from the URL — Immich ignores it and it
+  // conflicts with the required x-api-key header on some endpoints.
+  const cleanUrl = url.replace(/[?&]key=[^&]+/, "").replace(/\?$/, "");
+  const res = await fetch(cleanUrl, {
+    headers: {
+      Accept: "image/*",
+      "x-api-key": IMMICH_KEY,
+    },
+  });
   if (!res.ok) {
     throw new Error(`Failed to fetch image: ${res.status}`);
   }
