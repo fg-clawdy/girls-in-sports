@@ -30,8 +30,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Static auth for MVP only. Design middleware interface so NextAuth/Clerk can drop in later."
+      "passes": true,
+      "notes": "Implemented: login page, POST /api/auth/login/logout, JWT cookie sessions, middleware.ts route guards, dashboard placeholder. Committed as 6e1b5f5."
     },
     {
       "id": "US-003",
@@ -46,8 +46,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "GIS app creates albums via Immich API; directors upload to those albums via Immich mobile app."
+      "passes": true,
+      "notes": "Implemented: src/lib/immich.ts with albums/assets/thumbnails. API routes for albums and album detail. Thumbnail proxy. Committed as b08df59."
     },
     {
       "id": "US-004",
@@ -62,8 +62,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: /events/[id] page with header, description, responsive grid, All/Photos/Videos filter, lazy-loaded thumbnails. Committed as a1c5d67."
     },
     {
       "id": "US-005",
@@ -79,8 +79,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: selection mode with checkboxes, select/deselect all, count badge, Let AI choose checkbox, output type slide-up panel with 3 options. Committed as 18f8eed."
     },
     {
       "id": "US-006",
@@ -95,8 +95,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "Venice.ai vision model choice TBD during implementation. Fallback: use all selected media if vision call fails."
+      "passes": true,
+      "notes": "Implemented: src/lib/vision.ts model-agnostic layer. Evaluates composition (20), action (20), faces (20), lighting (15), relevance (15), technical (10). POST /api/ai/vision/rank. UI ranking modal with gold/silver/bronze badges. Fallback ranking when model unavailable. Committed as 37ef36d."
     },
     {
       "id": "US-007",
@@ -111,8 +111,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "LLM is the 'director' — it plans, does not generate pixels."
+      "passes": true,
+      "notes": "Implemented: src/lib/composer.ts model-agnostic director. Typed CollageScript and VideoScript outputs with brand-aware colors. POST /api/ai/composition. UI review panel with human-readable summary and raw JSON. Committed as 86386e9."
     },
     {
       "id": "US-008",
@@ -127,8 +127,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": "ffmpeg and sharp must be installed on the server. Consider job queue (Bull/BullMQ or in-memory) for async processing."
+      "passes": true,
+      "notes": "Implemented: src/lib/media-engine.ts with executeCollage() via sharp (canvas, composite, text overlay) and executeVideo() via ffmpeg (concat, zoompan, drawtext, branded outro). POST /api/composition/execute creates DB record, executes, updates status. Committed as 930f68c."
     },
     {
       "id": "US-009",
@@ -143,8 +143,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: GET /api/results, GET /api/results/[id], POST /api/results/[id]/upload. /results catalog page and /results/[id] detail. Uploads via multipart/form-data to Immich API, optionally adds to event album. Committed as bdde0f3."
     },
     {
       "id": "US-010",
@@ -159,8 +159,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: GET /api/results/[id]/download serves files with proper Content-Type and Content-Disposition. Inline preview: <img> for images, <video controls> for videos. Part of US-009 commit bdde0f3."
     },
     {
       "id": "US-011",
@@ -176,8 +176,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": "These albums are primarily for backend ML/training data. User sees simple thumbs up/down after generation. Post-MVP: use example albums to refine vision prompts dynamically."
+      "passes": true,
+      "notes": "Implemented: POST /api/feedback stores POSITIVE/NEGATIVE ratings per sourceAssetId. MediaCard hover-reveals 👍/👎 buttons. Ratings persisted to FeedbackRating table. Loads existing feedback on page mount. Post-MVP: wire to vision prompt context. Committed as f034d19."
     },
     {
       "id": "US-012",
@@ -193,8 +193,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: src/lib/chat.ts with model-agnostic chat completion. System prompt: GIS composition expert with brand guidelines. POST /api/chat with event context. Floating 🤖 FAB button opens slide-up panel with message history and input. Supports Enter to send. Committed as 5b39519."
     }
   ]
 }
