@@ -165,6 +165,7 @@ export default function EventPage() {
       } else if (data.errors && data.errors.length > 0) {
         alert(`Upload completed with ${data.errors.length} error(s):\n${data.errors.join("\n")}`);
       } else {
+        alert(`Upload successful! ${data.uploaded} file(s) added.`);
         await fetchEventData();
       }
     } catch {
