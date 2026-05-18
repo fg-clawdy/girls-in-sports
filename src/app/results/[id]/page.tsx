@@ -104,13 +104,20 @@ export default function ResultDetailPage() {
               {asset.status !== "COMPLETED" ? (
                 <p className="text-zinc-500">This composition is still being processed.</p>
               ) : isImage ? (
-                <div className="bg-zinc-100 rounded-lg flex items-center justify-center h-96">
-                  <p className="text-zinc-400">Image preview placeholder</p>
-                </div>
+                <img
+                  src={`/api/results/${id}/download`}
+                  alt={asset.fileName}
+                  className="max-h-96 w-auto mx-auto rounded-lg shadow-sm"
+                />
               ) : isVideo ? (
-                <div className="bg-zinc-900 rounded-lg flex items-center justify-center h-96">
-                  <p className="text-zinc-400">Video player placeholder</p>
-                </div>
+                <video
+                  controls
+                  className="w-full rounded-lg shadow-sm"
+                  style={{ maxHeight: "24rem" }}
+                >
+                  <source src={`/api/results/${id}/download`} type="video/mp4" />
+                  Your browser does not support the video tag.
+                </video>
               ) : (
                 <p className="text-zinc-500">Unknown output type</p>
               )}

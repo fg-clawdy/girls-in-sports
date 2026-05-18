@@ -57,6 +57,7 @@ export default function EventPage() {
   const [compositionScript, setCompositionScript] = useState<any>(null);
   const [compositionLoading, setCompositionLoading] = useState(false);
   const [showScriptPanel, setShowScriptPanel] = useState(false);
+  const [feedbackMap, setFeedbackMap] = useState<Record<string, "POSITIVE" | "NEGATIVE">>({});
 
   const fetchEventData = useCallback(async () => {
     try {
@@ -71,6 +72,17 @@ export default function EventPage() {
           const albumData = await albumRes.json();
           setAlbum(albumData.album);
         }
+      }
+
+      // Load existing feedback
+      const fbRes = await fetch(`/api/feedback?eventId=${id}`);
+      if (fbRes.ok) {
+        const fbData = await fbRes.json();
+        const map: Record<string, "POSITIVE" | "NEGATIVE"> = {};
+        fbData.feedback.forEach((f: any) => {
+          map[f.sourceAssetId] = f.rating;
+        });
+        setFeedbackMap(map);
       }
     } catch {
       setError("Failed to load event data");
@@ -325,6 +337,19 @@ export default function EventPage() {
                 selectionMode={selectionMode}
                 selected={selectedIds.has(asset.id)}
                 onToggle={() => toggleSelection(asset.id)}
+                onFeedback={(rating) => {
+                  fetch("/api/feedback", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      eventId: id,
+                      sourceAssetId: asset.id,
+                      rating,
+                    }),
+                  });
+                  setFeedbackMap((prev) => ({ ...prev, [asset.id]: rating }));
+                }}
+                feedback={feedbackMap[asset.id] || null}
               />
             ))}
           </div>
@@ -685,11 +710,15 @@ function MediaCard({
   selectionMode,
   selected,
   onToggle,
+  onFeedback,
+  feedback,
 }: {
   asset: ImmichAsset;
   selectionMode: boolean;
   selected: boolean;
   onToggle: () => void;
+  onFeedback?: (rating: "POSITIVE" | "NEGATIVE") => void;
+  feedback?: "POSITIVE" | "NEGATIVE" | null;
 }) {
   const [loaded, setLoaded] = useState(false);
   const isVideo = asset.type === "VIDEO";
@@ -721,6 +750,34 @@ function MediaCard({
               </svg>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Feedback buttons (visible on hover when not selecting) */}
+      {!selectionMode && onFeedback && (
+        <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+          <button
+            onClick={(e) => { e.stopPropagation(); onFeedback("POSITIVE"); }}
+            className={`w-7 h-7 rounded-full flex items-center justify-center text-sm ${
+              feedback === "POSITIVE"
+                ? "bg-green-500 text-white"
+                : "bg-white/90 text-zinc-500 hover:text-green-600"
+            } shadow-sm`}
+            title="Good example"
+          >
+            👍
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onFeedback("NEGATIVE"); }}
+            className={`w-7 h-7 rounded-full flex items-center justify-center text-sm ${
+              feedback === "NEGATIVE"
+                ? "bg-red-500 text-white"
+                : "bg-white/90 text-zinc-500 hover:text-red-600"
+            } shadow-sm`}
+            title="Needs work"
+          >
+            👎
+          </button>
         </div>
       )}
 
