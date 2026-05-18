@@ -46,6 +46,14 @@ export default function EventPage() {
   const [showOutputPanel, setShowOutputPanel] = useState(false);
   const [outputType, setOutputType] = useState<OutputType | null>(null);
   const [letAiChoose, setLetAiChoose] = useState(false);
+  const [ranking, setRanking] = useState<{
+    scores: Array<{ assetId: string; score: number; rank: number; reasons: string[] }>;
+    topIds: string[];
+    modelUsed: string;
+    visionConfigured: boolean;
+  } | null>(null);
+  const [rankingLoading, setRankingLoading] = useState(false);
+  const [showRankingPanel, setShowRankingPanel] = useState(false);
 
   const fetchEventData = useCallback(async () => {
     try {
@@ -112,9 +120,52 @@ export default function EventPage() {
     setLetAiChoose(false);
   };
 
-  const handleCompose = () => {
+  const handleCompose = async () => {
     if (selectedIds.size === 0 && !letAiChoose) return;
-    setShowOutputPanel(true);
+
+    setRankingLoading(true);
+    setShowRankingPanel(true);
+
+    try {
+      const idsToRank = letAiChoose
+        ? filteredAssets.map((a) => a.id)
+        : Array.from(selectedIds);
+
+      const res = await fetch("/api/ai/vision/rank", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assetIds: idsToRank,
+          eventId: id,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setRanking(data);
+        // Pre-select top-ranked assets
+        if (data.topIds?.length > 0) {
+          setSelectedIds(new Set(data.topIds));
+        }
+      } else {
+        setRanking({
+          scores: [],
+          topIds: idsToRank.slice(0, 10),
+          modelUsed: "error-fallback",
+          visionConfigured: false,
+        });
+      }
+    } catch {
+      setRanking({
+        scores: [],
+        topIds: Array.from(selectedIds).slice(0, 10),
+        modelUsed: "error-fallback",
+        visionConfigured: false,
+      });
+    } finally {
+      setRankingLoading(false);
+    }
   };
 
   if (loading) {
@@ -291,6 +342,109 @@ export default function EventPage() {
           </div>
         )}
       </main>
+
+      {/* AI Ranking Results Panel */}
+      {showRankingPanel && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setShowRankingPanel(false)}
+          />
+          <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-lg max-h-[80vh] overflow-y-auto p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-zinc-900">AI Media Ranking</h2>
+              {rankingLoading && (
+                <span className="text-sm text-zinc-500 animate-pulse">Analyzing...</span>
+              )}
+            </div>
+
+            {rankingLoading && !ranking && (
+              <div className="text-center py-8">
+                <div className="w-8 h-8 border-2 border-zinc-200 border-t-[var(--accent)] rounded-full animate-spin mx-auto mb-3" />
+                <p className="text-sm text-zinc-500">AI is analyzing your media...</p>
+                <p className="text-xs text-zinc-400 mt-1">Evaluating composition, action, faces, lighting, and emotion</p>
+              </div>
+            )}
+
+            {!rankingLoading && ranking && (
+              <>
+                {!ranking.visionConfigured && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+                    <p className="text-sm text-amber-800">
+                      Vision AI not configured. Using default ranking.
+                      Set VISION_API_URL and VISION_API_KEY in .env to enable AI analysis.
+                    </p>
+                  </div>
+                )}
+
+                {ranking.scores.length > 0 && (
+                  <div className="space-y-3 mb-6">
+                    {ranking.scores.map((score) => (
+                      <div
+                        key={score.assetId}
+                        className={`flex items-start gap-3 p-3 rounded-lg border ${
+                          score.rank <= 3
+                            ? "border-[var(--accent)] bg-blue-50"
+                            : "border-zinc-200 bg-white"
+                        }`}
+                      >
+                        <div
+                          className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+                            score.rank === 1
+                              ? "bg-yellow-400 text-yellow-900"
+                              : score.rank === 2
+                              ? "bg-zinc-300 text-zinc-700"
+                              : score.rank === 3
+                              ? "bg-amber-600 text-white"
+                              : "bg-zinc-100 text-zinc-500"
+                          }`}
+                        >
+                          {score.rank}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="font-medium text-zinc-900 text-sm">
+                              Score: {score.score}/100
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {score.reasons.map((r, i) => (
+                              <span
+                                key={i}
+                                className="text-xs px-2 py-0.5 bg-zinc-100 text-zinc-600 rounded-full"
+                              >
+                                {r}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowRankingPanel(false)}
+                    className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
+                  >
+                    Close
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowRankingPanel(false);
+                      setShowOutputPanel(true);
+                    }}
+                    className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)]"
+                  >
+                    Continue to Output &rarr;
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Output Type Selection Panel */}
       {showOutputPanel && (
