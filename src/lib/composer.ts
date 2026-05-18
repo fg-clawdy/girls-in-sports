@@ -69,6 +69,7 @@ export interface VideoScript {
     speed?: number; // 1.0 = normal
   }>;
   musicTempo: "upbeat" | "calm" | "dramatic" | "none";
+  musicFile?: string; // optional path to background music file
   brandedOutro: {
     text: string;
     duration: number;
@@ -132,8 +133,8 @@ function buildUserPrompt(input: CompositionInput): string {
     outputType === "collage"
       ? "a Collage Poster (print-ready, grid layout, branded captions)"
       : outputType === "highlight"
-      ? "a 15-second Highlight Video (quick cuts, high energy, minimal transitions)"
-      : "a Full Wrap-up Video (60-90 seconds, all clips included, storytelling flow)";
+      ? "a 15-second Highlight Video (quick cuts, high energy, minimal transitions, use best 5-7 clips)"
+      : "a Full Wrap-up Video (60-90 seconds, EVERY provided image and video MUST be included as a clip, each shown 5-8 seconds, smooth storytelling flow)";
 
   return `Event: "${event.name}" (${event.sport}) — ${event.city}, ${event.eventDate}
 ${event.description ? `Description: ${event.description}` : ""}
@@ -281,17 +282,22 @@ function generateFallbackScript(input: CompositionInput): CompositionScript {
     };
   }
 
-  // Video fallback
-  const clipDuration = outputType === "highlight" ? 2 : 4;
-  const totalDuration = outputType === "highlight" ? 15 : Math.min(videoAssets.length * clipDuration, 90);
-  const selectedVideos = videoAssets.slice(0, Math.floor(totalDuration / clipDuration));
+  // Video fallback — use ALL images AND videos, longer durations
+  const allAssets = [...imageAssets, ...videoAssets];
+  const clipDuration = outputType === "highlight" ? 2 : 6;
+  const totalDuration = outputType === "highlight"
+    ? Math.min(allAssets.length * clipDuration, 15)
+    : allAssets.length * clipDuration;
+  const selectedAssets = outputType === "highlight"
+    ? allAssets.slice(0, Math.floor(15 / clipDuration))
+    : allAssets;
 
   return {
     type: outputType,
     title: event.name,
     subtitle: `${event.sport} • ${event.city}`,
     totalDuration,
-    clips: selectedVideos.map((a, i) => ({
+    clips: selectedAssets.map((a, i) => ({
       assetId: a.assetId,
       startTime: i * clipDuration,
       duration: clipDuration,
@@ -306,7 +312,7 @@ function generateFallbackScript(input: CompositionInput): CompositionScript {
               duration: 2,
             }
           : undefined,
-      zoom: "none",
+      zoom: i % 2 === 0 ? "in" : "none",
       speed: 1,
     })),
     musicTempo: "upbeat",

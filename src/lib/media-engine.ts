@@ -182,7 +182,7 @@ export async function executeVideo(
     }
   }
 
-  // Build individual clip segments
+  // Build individual clip segments with proper scaling (preserve aspect ratio + letterbox)
   const segmentPaths: string[] = [];
 
   for (let i = 0; i < script.clips.length; i++) {
@@ -193,36 +193,37 @@ export async function executeVideo(
     const segmentPath = path.join(workDir, `segment_${i.toString().padStart(3, "0")}.mp4`);
     segmentPaths.push(segmentPath);
 
-    const duration = clip.duration || 3;
-    const transitionDur = clip.transitionDuration || 0.5;
+    const duration = clip.duration || 5;
 
     // Build filter_complex for text overlay
-    let filterComplex = "";
-    let outputLabel = "[out]";
-
+    let textFilter = "";
     if (clip.textOverlay?.text) {
       const text = clip.textOverlay.text.replace(/:/g, "\\:").replace(/'/g, "\\'");
       const pos = clip.textOverlay.position || "bottom";
       const yPos = pos === "top" ? "h*0.1" : pos === "center" ? "h*0.5" : "h*0.85";
-
-      filterComplex = `drawtext=text='${text}':fontcolor=white:fontsize=${Math.floor(outH * 0.05)}:x=(w-text_w)/2:y=${yPos}:box=1:boxcolor=black@0.5:boxborderw=4:enable='between(t,${clip.textOverlay.startAt || 0},${(clip.textOverlay.startAt || 0) + (clip.textOverlay.duration || 2)})'[out];`;
-      outputLabel = "[out]";
+      textFilter = `drawtext=text='${text}':fontcolor=white:fontsize=${Math.floor(outH * 0.05)}:x=(w-text_w)/2:y=${yPos}:box=1:boxcolor=black@0.5:boxborderw=4:enable='between(t,${clip.textOverlay.startAt || 0},${(clip.textOverlay.startAt || 0) + (clip.textOverlay.duration || 2)})'`;
     }
 
     // For images, loop them; for videos, trim
     const isImage = localPath.match(/\.(jpg|jpeg|png|webp)$/i);
 
     if (isImage) {
-      // Image -> video segment with zoom/pan if requested
+      // Image -> video segment with Ken Burns zoom effect (preserve aspect ratio)
+      // scale to fit inside output with black letterbox, then optional zoom
       const zoomExpr = clip.zoom === "in" ? "zoom+zoom*0.001" : clip.zoom === "out" ? "zoom-zoom*0.001" : "1";
-      const zoomFilter = `zoompan=z='${zoomExpr}':d=${Math.round(duration * 30)}:s=${outW}x${outH}:fps=30`;
+      const scaleFilter = `scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:black`;
+      const zoomFilter = clip.zoom && clip.zoom !== "none"
+        ? `zoompan=z='${zoomExpr}':d=${Math.round(duration * 30)}:s=${outW}x${outH}:fps=30`
+        : "";
+
+      const vfChain = [scaleFilter, zoomFilter, textFilter].filter(Boolean).join(",");
 
       const args = [
         "-loop", "1",
         "-i", localPath,
-        "-vf", `${zoomFilter}${filterComplex ? "," + filterComplex : ""}`,
+        "-vf", vfChain,
         "-c:v", "libx264",
-        "-t", String(duration + transitionDur),
+        "-t", String(duration),
         "-pix_fmt", "yuv420p",
         "-an",
         segmentPath,
@@ -230,17 +231,17 @@ export async function executeVideo(
 
       await runFFmpeg(args);
     } else {
-      // Video -> trim and optionally add text
+      // Video -> trim, scale with letterbox, optional text
       const vfParts: string[] = [];
       vfParts.push(`scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:black`);
-      if (filterComplex) {
-        vfParts.push(filterComplex.replace("[out]", ""));
+      if (textFilter) {
+        vfParts.push(textFilter);
       }
 
       const args = [
         "-i", localPath,
         "-ss", "0",
-        "-t", String(duration + transitionDur),
+        "-t", String(duration),
         "-vf", vfParts.join(","),
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
@@ -256,29 +257,59 @@ export async function executeVideo(
     throw new Error("No valid segments could be created");
   }
 
-  // Concatenate segments with transitions
-  const concatListPath = path.join(workDir, "concat_list.txt");
-  const concatContent = segmentPaths.map((p) => `file '${p}'`).join("\n");
-  await fs.writeFile(concatListPath, concatContent);
-
+  // Crossfade concatenation using xfade
   const outputPath = path.join(workDir, "video.mp4");
+  const transitionDur = 0.5; // seconds
 
-  // Simple concat (crossfade transitions can be added later as enhancement)
-  const concatArgs = [
-    "-f", "concat",
-    "-safe", "0",
-    "-i", concatListPath,
-    "-c", "copy",
-    outputPath,
-  ];
+  if (segmentPaths.length === 1) {
+    // Single clip — just copy
+    await runFFmpeg(["-i", segmentPaths[0], "-c", "copy", "-an", outputPath]);
+  } else {
+    // Build xfade filter_complex for crossfade between segments
+    // Each segment needs to be trimmed to avoid the crossfade overlap at the end
+    const inputs: string[] = [];
+    const filters: string[] = [];
+    const padDur = 0.01; // tiny safety pad
 
-  await runFFmpeg(concatArgs);
+    for (let i = 0; i < segmentPaths.length; i++) {
+      inputs.push("-i", segmentPaths[i]);
+    }
+
+    // First pass: trim each segment to remove the trailing transition overlap
+    let streamCount = 0;
+    for (let i = 0; i < segmentPaths.length; i++) {
+      const clip = script.clips[i];
+      const dur = (clip?.duration || 5) - (i < segmentPaths.length - 1 ? transitionDur : 0);
+      filters.push(`[${i}:v]trim=start=0:end=${dur + padDur},setpts=PTS-STARTPTS[v${i}];`);
+      streamCount++;
+    }
+
+    // Build xfade chain
+    let prevLabel = "v0";
+    for (let i = 1; i < segmentPaths.length; i++) {
+      const outLabel = i === segmentPaths.length - 1 ? "outv" : `tmp${i}`;
+      filters.push(`[${prevLabel}][v${i}]xfade=transition=fade:duration=${transitionDur}:offset=${(script.clips[i - 1]?.duration || 5) - transitionDur}[${outLabel}];`);
+      prevLabel = outLabel;
+    }
+
+    const filterStr = filters.join("");
+    const xfadeArgs = [
+      ...inputs,
+      "-filter_complex", filterStr,
+      "-map", "[outv]",
+      "-c:v", "libx264",
+      "-pix_fmt", "yuv420p",
+      "-an",
+      outputPath,
+    ];
+
+    await runFFmpeg(xfadeArgs);
+  }
 
   // Add branded outro if specified
   if (script.brandedOutro) {
     const outroPath = path.join(workDir, "outro.mp4");
     const outroText = script.brandedOutro.text.replace(/:/g, "\\:").replace(/'/g, "\\'");
-    const outroBg = script.brandedOutro.backgroundColor.replace("#", "0x");
 
     const outroArgs = [
       "-f", "lavfi",
@@ -292,23 +323,51 @@ export async function executeVideo(
 
     await runFFmpeg(outroArgs);
 
-    // Concatenate main video + outro
-    const finalListPath = path.join(workDir, "final_list.txt");
-    await fs.writeFile(finalListPath, `file '${outputPath}'\nfile '${outroPath}'`);
-
+    // Concatenate main video + outro with crossfade
     const finalOutputPath = path.join(workDir, "video_final.mp4");
-    const finalArgs = [
-      "-f", "concat",
-      "-safe", "0",
-      "-i", finalListPath,
-      "-c", "copy",
+    const outroFadeArgs = [
+      "-i", outputPath,
+      "-i", outroPath,
+      "-filter_complex", `[0:v][1:v]xfade=transition=fade:duration=0.5:offset=${script.totalDuration || 0}[outv]`,
+      "-map", "[outv]",
+      "-c:v", "libx264",
+      "-pix_fmt", "yuv420p",
+      "-an",
       finalOutputPath,
     ];
 
-    await runFFmpeg(finalArgs);
+    await runFFmpeg(outroFadeArgs);
 
     // Replace with final
     await fs.rename(finalOutputPath, outputPath);
+  }
+
+  // Add background music if specified
+  if (script.musicFile) {
+    try {
+      await fs.access(script.musicFile);
+      const finalWithMusicPath = path.join(workDir, "video_with_music.mp4");
+      const totalDur = script.totalDuration + (script.brandedOutro?.duration || 0);
+
+      // Loop/trim music to match video, fade in/out, lower volume so it doesn't overpower
+      const musicArgs = [
+        "-i", outputPath,
+        "-i", script.musicFile,
+        "-filter_complex",
+        `[1:a]aloop=loop=-1:size=2e+09,atrim=start=0:end=${totalDur},afade=t=in:st=0:d=1,afade=t=out:st=${Math.max(0, totalDur - 3)}:d=3,volume=0.25[a]`,
+        "-map", "0:v",
+        "-map", "[a]",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        finalWithMusicPath,
+      ];
+
+      await runFFmpeg(musicArgs);
+      await fs.rename(finalWithMusicPath, outputPath);
+    } catch {
+      console.warn("Music file not found or unreadable, skipping:", script.musicFile);
+    }
   }
 
   return {
