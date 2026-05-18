@@ -1043,8 +1043,17 @@ function MediaCard({
       <div className="aspect-square relative bg-zinc-100">
         {isVideo ? (
           <>
+            <img
+              src={`/api/immich/thumbnail/${asset.id}`}
+              alt={asset.originalFileName}
+              loading="lazy"
+              onLoad={() => setLoaded(true)}
+              className={`w-full h-full object-cover transition-opacity duration-300 ${
+                loaded ? "opacity-100" : "opacity-0"
+              }`}
+            />
             <div className="absolute inset-0 flex items-center justify-center">
-              <svg className="w-12 h-12 text-zinc-300" fill="currentColor" viewBox="0 0 24 24">
+              <svg className="w-12 h-12 text-white/90 drop-shadow-lg" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M8 5v14l11-7z" />
               </svg>
             </div>
