@@ -165,6 +165,49 @@ model WeeklyCritique {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// US-001: Persistent async job queue
+// ═══════════════════════════════════════════════════════════════════════════════
+
+enum JobType {
+  INGEST_CLIP
+  SCORE_CLIP
+  DIRECT_SCRIPT
+  RENDER_PROXY
+  RENDER_FINAL
+  GENERATE_MUSIC
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+  RETRYING
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  type        JobType
+  status      JobStatus @default(QUEUED)
+  payload     Json?
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  error       String?
+  retryAfter  DateTime?
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  parentJobId String?
+  parentJob   Job?      @relation("JobParent", fields: [parentJobId], references: [id])
+  childJobs   Job[]     @relation("JobParent")
+
+  @@index([status])
+  @@index([status, retryAfter])
+  @@index([parentJobId])
+  @@map("jobs")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // US-014: Lightweight Local Pre-Filter Model
 // Phase A: Fast image analysis using sharp + simple heuristics
 // Phase B (future): ONNX runtime with a distilled vision model
