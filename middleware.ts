@@ -21,6 +21,13 @@ export function middleware(request: NextRequest) {
 
   // Protect all other routes
   if (!isValid) {
+    // For API routes, return 401 JSON instead of redirecting to login page
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json(
+        { error: "Unauthorized — please log in again" },
+        { status: 401 }
+      );
+    }
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
