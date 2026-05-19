@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { executeComposition } from "@/lib/media-engine";
+import {
+  estimateCompositionCost,
+  shouldGenerateABVariant,
+} from "@/lib/cost-estimator";
 import type { CollageScript, VideoScript } from "@/lib/composer";
 
 export async function POST(request: Request) {
@@ -34,42 +38,105 @@ export async function POST(request: Request) {
       );
     }
 
-    // Create a pending GeneratedAsset record
-    const generatedAsset = await prisma.generatedAsset.create({
+    // Estimate cost for A/B decision
+    const costEstimate = estimateCompositionCost({
+      event,
+      assets: script.clips || script.images || [],
+      outputType: script.type,
+    });
+
+    // Generate Variant A
+    const variantA = await prisma.generatedAsset.create({
       data: {
         eventId,
         outputType: script.type === "collage" ? "COLLAGE_POSTER" : "WRAP_UP_VIDEO",
         status: "IN_PROGRESS",
-        filePath: "", // will update after execution
+        filePath: "",
         fileName: "",
         fileSize: 0,
+        costDIEM: costEstimate.estimatedDIEM,
+        compositionScript: JSON.stringify(script),
       },
     });
 
-    // Execute the composition (this may take time)
-    const result = await executeComposition(
+    // Execute Variant A
+    const resultA = await executeComposition(
       script as CollageScript | VideoScript,
-      generatedAsset.id
+      variantA.id
     );
 
-    // Update the record with the result
     await prisma.generatedAsset.update({
-      where: { id: generatedAsset.id },
+      where: { id: variantA.id },
       data: {
         status: "COMPLETED",
-        filePath: result.filePath,
-        fileName: result.fileName,
-        fileSize: result.sizeBytes,
+        filePath: resultA.filePath,
+        fileName: resultA.fileName,
+        fileSize: resultA.sizeBytes,
       },
     });
+
+    // US-011: Check if we should generate Variant B
+    let variantB = null;
+    if (
+      shouldGenerateABVariant(costEstimate.estimatedDIEM) &&
+      script.type !== "collage"
+    ) {
+      // Create Variant B with modified params
+      const variantBScript = JSON.parse(JSON.stringify(script)) as VideoScript;
+      // Reduce clip durations by 0.7x
+      for (const clip of variantBScript.clips || []) {
+        clip.duration = Math.max(0.5, (clip.duration || 2) * 0.7);
+      }
+      // Force all transitions to "cut"
+      for (const clip of variantBScript.clips || []) {
+        clip.transition = "cut";
+      }
+
+      variantB = await prisma.generatedAsset.create({
+        data: {
+          eventId,
+          outputType: "WRAP_UP_VIDEO",
+          status: "IN_PROGRESS",
+          filePath: "",
+          fileName: "",
+          fileSize: 0,
+          costDIEM: costEstimate.estimatedDIEM,
+          compositionScript: JSON.stringify(variantBScript),
+        },
+      });
+
+      try {
+        const resultB = await executeComposition(variantBScript, variantB.id);
+        await prisma.generatedAsset.update({
+          where: { id: variantB.id },
+          data: {
+            status: "COMPLETED",
+            filePath: resultB.filePath,
+            fileName: resultB.fileName,
+            fileSize: resultB.sizeBytes,
+          },
+        });
+      } catch (err) {
+        console.error("Variant B generation failed:", err);
+        await prisma.generatedAsset.update({
+          where: { id: variantB.id },
+          data: {
+            status: "FAILED",
+            errorMessage: err instanceof Error ? err.message : "Variant B failed",
+          },
+        });
+      }
+    }
 
     return NextResponse.json({
       success: true,
-      generatedAssetId: generatedAsset.id,
-      type: result.type,
-      fileName: result.fileName,
-      fileSize: result.sizeBytes,
-      filePath: result.filePath,
+      generatedAssetId: variantA.id,
+      variantBId: variantB?.id || null,
+      type: resultA.type,
+      fileName: resultA.fileName,
+      fileSize: resultA.sizeBytes,
+      filePath: resultA.filePath,
+      costDIEM: costEstimate.estimatedDIEM,
     });
   } catch (error) {
     console.error("Composition execution error:", error);

@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
+import CompositionFeedbackPanel from "@/components/CompositionFeedbackPanel";
 
 interface GeneratedAssetDetail {
   id: string;
@@ -39,6 +40,8 @@ export default function ResultDetailPage() {
   const [mixingMusic, setMixingMusic] = useState(false);
   const [musicIntent, setMusicIntent] = useState("");
   const [showMusicIntent, setShowMusicIntent] = useState(true);
+  const [showFeedback, setShowFeedback] = useState(true);
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
 
   useEffect(() => {
     fetch(`/api/results/${id}`)
@@ -481,6 +484,36 @@ export default function ResultDetailPage() {
                     </>
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Feedback Panel */}
+            {isVideo && showFeedback && !feedbackSubmitted && (
+              <div className="bg-white rounded-lg border border-zinc-200 p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-zinc-900">
+                    Composition Feedback
+                  </h2>
+                  <button
+                    onClick={() => setShowFeedback(false)}
+                    className="text-zinc-400 hover:text-zinc-600 text-sm"
+                    title="Hide feedback"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <CompositionFeedbackPanel
+                  compositionId={asset.id}
+                  script={asset.compositionScript ? JSON.parse(asset.compositionScript) : undefined}
+                  outputDuration={undefined}
+                  onSubmitted={() => setFeedbackSubmitted(true)}
+                />
+              </div>
+            )}
+
+            {feedbackSubmitted && (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                <p className="text-sm font-medium text-green-800">Feedback submitted. Thank you!</p>
               </div>
             )}
           </div>
