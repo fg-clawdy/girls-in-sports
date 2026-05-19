@@ -1,36 +1,42 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Girls In Sports (GIS)
+
+AI-powered video composition and media ranking platform for youth sports camps and coaching clinics.
+
+## Features
+
+- **AI Media Ranking** — Vision AI scores uploaded photos/videos for marketing quality
+- **Intent-Driven Composition** — Describe what you want, AI generates a production script
+- **Smart Video Editing** — Automatic scene detection, beat-sync cuts, branded outros
+- **A/B Testing** — Generate multiple variants and compare performance
+- **Feedback Loop** — User ratings feed back into the ML pipeline for continuous improvement
+
+## Tech Stack
+
+- **Frontend:** Next.js 14, React 18, Tailwind CSS
+- **Backend:** Next.js API routes, Prisma ORM, PostgreSQL
+- **AI/ML:** Venice.ai (LLM inference), librosa (audio analysis), ffmpeg (video processing)
+- **Media Storage:** Immich (self-hosted photo/video management)
 
 ## Getting Started
 
-First, run the development server:
+1. Copy `.env.example` to `.env` and fill in your values
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Set up the database:
+   ```bash
+   npx prisma db push
+   ```
+4. Run the dev server:
+   ```bash
+   npm run dev
+   ```
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Environment Variables
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+See `.env.example` for all required variables.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## License
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT
