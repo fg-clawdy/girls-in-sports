@@ -124,7 +124,7 @@ export async function analyzeImageFeatures(
 /**
  * Convert raw features to normalized 0-100 scores.
  */
-function computeScores(features: PreFilterFeatures): Omit<PreFilterResult, "assetId" | "eventId" | "passedFilter"> {
+export function computeScores(features: PreFilterFeatures): Omit<PreFilterResult, "assetId" | "eventId" | "passedFilter"> {
   // Brightness: ideal around 80-180. Penalize underexposed (<40) and overexposed (>230)
   let brightnessScore = 100;
   if (features.meanBrightness < 40) {
@@ -173,6 +173,32 @@ function computeScores(features: PreFilterFeatures): Omit<PreFilterResult, "asse
     featuresJson: features,
   };
 }
+
+/**
+ * Quick local-only scoring for a single image file.
+ * Returns all dimension scores + overall. No DB persistence.
+ */
+export async function scoreImageFile(imagePath: string): Promise<{
+  brightnessScore: number;
+  blurScore: number;
+  faceScore: number;
+  actionScore: number;
+  compositionScore: number;
+  overallScore: number;
+  passedFilter: boolean;
+  featuresJson: PreFilterFeatures;
+}> {
+  const features = await analyzeImageFeatures(imagePath);
+  const scores = computeScores(features);
+  return {
+    ...scores,
+    passedFilter:
+      scores.brightnessScore >= THRESHOLDS.minBrightnessScore &&
+      scores.blurScore >= THRESHOLDS.minBlurScore &&
+      scores.overallScore >= THRESHOLDS.minOverallScore,
+  };
+}
+
 
 /**
  * Run the pre-filter on a single image and persist results.

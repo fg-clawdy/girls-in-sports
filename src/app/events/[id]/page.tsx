@@ -56,6 +56,7 @@ export default function EventPage() {
   const [showOutputPanel, setShowOutputPanel] = useState(false);
   const [outputType, setOutputType] = useState<OutputType | null>(null);
   const [letAiChoose, setLetAiChoose] = useState(false);
+  const [localOnly, setLocalOnly] = useState(false);
   const [ranking, setRanking] = useState<{
     scores: Array<{
       assetId: string;
@@ -368,6 +369,7 @@ export default function EventPage() {
           assetTypes,
           assetDurations,
           eventId: id,
+          localOnly,
         }),
       });
 
@@ -587,6 +589,17 @@ export default function EventPage() {
                 />
                 Let AI choose the best
               </label>
+              {letAiChoose && (
+                <label className="flex items-center gap-2 text-sm text-zinc-600 cursor-pointer" title="Skip expensive LLM calls. Uses fast local scoring only.">
+                  <input
+                    type="checkbox"
+                    checked={localOnly}
+                    onChange={(e) => setLocalOnly(e.target.checked)}
+                    className="rounded border-zinc-300 text-amber-500 focus:ring-amber-400"
+                  />
+                  Local only (no LLM)
+                </label>
+              )}
               <button
                 onClick={() => {
                   if (checkForDuplicateScenes()) {
@@ -798,6 +811,9 @@ export default function EventPage() {
             {!rankingLoading && rankingProgress && (
               <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4">
                 <p className="text-sm text-green-800 font-medium">{rankingProgress.status}</p>
+                {ranking?.modelUsed && (
+                  <p className="text-xs text-zinc-500 mt-1">Model: {ranking.modelUsed}</p>
+                )}
                 {rankingProgress.failedBatches > 0 && (
                   <p className="text-xs text-green-700 mt-0.5">
                     {rankingProgress.failedBatches} batch(es) had issues but partial results are shown.

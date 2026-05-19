@@ -5,6 +5,7 @@ import {
   fallbackRanking,
   isVisionConfigured,
 } from "@/lib/vision";
+import { scoreImageFile } from "@/lib/pre-filter-service";
 import { getAssetPreviewUrl, getAssetThumbnailUrl, getAssetOriginalUrl } from "@/lib/immich";
 import * as childProcess from "child_process";
 import * as fsPromises from "fs/promises";
@@ -27,15 +28,10 @@ import {
   type ProductionSegment,
 } from "@/lib/video-segmentation";
 
-// Need these for route code
 const { spawn } = childProcess;
 const { mkdtemp, writeFile, readFile, unlink, rmdir, copyFile, mkdir } = fsPromises;
 const path = pathModule;
 const os = osModule;
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// BATCH VISION RANKING — Scene-aware segmentation with multi-segment extraction
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const BATCH_SIZE = 3;
 
@@ -47,9 +43,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-/**
- * Download a video from Immich to a temp file so ffmpeg can process it.
- */
 async function downloadVideoToTemp(videoUrl: string, apiKey: string): Promise<string> {
   const tmpFile = path.join(os.tmpdir(), `gis-video-${Date.now()}.mp4`);
   const res = await fetch(videoUrl, {
@@ -63,9 +56,19 @@ async function downloadVideoToTemp(videoUrl: string, apiKey: string): Promise<st
   return tmpFile;
 }
 
-/**
- * Convert an image file to a base64 data URL.
- */
+async function downloadImageToTemp(imageUrl: string, apiKey: string): Promise<string> {
+  const tmpFile = path.join(os.tmpdir(), `gis-img-${Date.now()}.jpg`);
+  const res = await fetch(imageUrl, {
+    headers: { "x-api-key": apiKey },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to download image: ${res.status} ${res.statusText}`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  await writeFile(tmpFile, buffer);
+  return tmpFile;
+}
+
 async function fileToDataUrl(imagePath: string): Promise<string> {
   const buf = await readFile(imagePath);
   return `data:image/jpeg;base64,${buf.toString("base64")}`;
@@ -78,32 +81,26 @@ interface FrameItem {
   frameIndex?: number;
   timestamp?: number;
   duration?: number;
-  sceneIndex?: number; // which scene this frame belongs to
+  sceneIndex?: number;
 }
 
 interface VideoAnalysisContext {
   assetId: string;
   duration: number;
   scenes: Scene[];
-  sceneFrameMap: Map<number, number[]>; // sceneIndex -> timestamps
+  sceneFrameMap: Map<number, number[]>;
   extractedFrames: Array<{ timestamp: number; imagePath: string }>;
   audioSegments: AudioSegment[];
   tmpDir: string;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// POST handler
-// ═══════════════════════════════════════════════════════════════════════════════
 
 export async function POST(request: Request) {
   let assetIds: string[] = [];
   let assetTypes: Record<string, "IMAGE" | "VIDEO"> = {};
   let assetDurations: Record<string, number> = {};
 
-  // Track temp resources for cleanup
   const videoContexts: VideoAnalysisContext[] = [];
   const tempFiles: string[] = [];
-  // US-008: Track best-scored frame for thumbnail auto-select
   let bestFrame: { assetId: string; timestamp: number; score: number; imagePath: string } | null = null;
 
   try {
@@ -112,6 +109,7 @@ export async function POST(request: Request) {
     assetTypes = body.assetTypes || {};
     assetDurations = body.assetDurations || {};
     const eventId = body.eventId;
+    const localOnly = body.localOnly === true; // NEW: skip LLM, use local only
 
     if (!Array.isArray(assetIds) || assetIds.length === 0) {
       return NextResponse.json(
@@ -120,7 +118,8 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!isVisionConfigured()) {
+    // Local-only mode does not need vision config
+    if (!localOnly && !isVisionConfigured()) {
       return NextResponse.json({
         success: false,
         error: "Vision AI not configured",
@@ -141,7 +140,7 @@ export async function POST(request: Request) {
     const apiKey = process.env.IMMICH_API_KEY || "";
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 1: Build analysis items (images = 1, videos = scene-aware frames)
+    // PHASE 1: Build analysis items
     // ═══════════════════════════════════════════════════════════════════════
     const analysisItems: FrameItem[] = [];
     const assetFrameCounts: Record<string, number> = {};
@@ -154,89 +153,99 @@ export async function POST(request: Request) {
         const duration = assetDurations[id] || 5;
 
         try {
-          // Download video once
-          const videoUrl = getAssetOriginalUrl(id);
-          const localPath = await downloadVideoToTemp(videoUrl, apiKey);
-          tempFiles.push(localPath);
-
-          // Parallel: scene detection + audio analysis
-          const [scenes, audioResult] = await Promise.all([
-            detectScenes(localPath, 0.3),
-            analyzeVideoAudio(localPath, id),
-          ]);
-
-          audioResults[id] = audioResult;
-
-          // Calculate frame counts per scene
-          const frameCounts = calculateSceneFrameCounts(scenes, 2, 12, 1.5);
-
-          // Build timestamp list per scene
-          const sceneFrameMap = new Map<number, number[]>();
-          const allTimestamps: number[] = [];
-
-          for (let i = 0; i < scenes.length; i++) {
-            const scene = scenes[i];
-            const count = frameCounts.get(i) || 3;
-            const timestamps: number[] = [];
-
-            for (let f = 0; f < count; f++) {
-              const t = scene.startTime + (scene.duration * (f + 1)) / (count + 1);
-              timestamps.push(t);
-              allTimestamps.push(t);
-            }
-
-            sceneFrameMap.set(i, timestamps);
-          }
-
-          // Extract frames
-          const tmpDir = await mkdtemp(path.join(os.tmpdir(), `gis-seg-${id}-`));
-          const extractedFrames = await extractFramesAtTimestamps(
-            localPath,
-            allTimestamps,
-            id
-          );
-
-          // Convert to data URLs and build analysis items
-          for (const frame of extractedFrames) {
-            // Find which scene this frame belongs to
-            let sceneIndex = 0;
-            for (let i = 0; i < scenes.length; i++) {
-              if (frame.timestamp >= scenes[i].startTime && frame.timestamp < scenes[i].endTime) {
-                sceneIndex = i;
-                break;
-              }
-            }
-
-            const dataUrl = await fileToDataUrl(frame.imagePath);
+          if (localOnly) {
+            // LOCAL-ONLY: skip heavy video processing, just use thumbnail
+            const thumbUrl = getAssetThumbnailUrl(id);
+            const tmpPath = await downloadImageToTemp(thumbUrl, apiKey);
+            tempFiles.push(tmpPath);
             analysisItems.push({
               assetId: id,
-              url: dataUrl,
-              isFrame: true,
-              timestamp: frame.timestamp,
+              url: tmpPath,
+              isFrame: false,
               duration,
-              sceneIndex,
+              sceneIndex: 0,
             });
+            assetFrameCounts[id] = 1;
+            audioResults[id] = {
+              assetId: id,
+              transcript: "",
+              segments: [],
+              audioScore: 0,
+              keywordHits: [],
+              keywordCount: 0,
+              error: "local-only mode",
+            };
+          } else {
+            // FULL MODE: download video, detect scenes, extract frames
+            const videoUrl = getAssetOriginalUrl(id);
+            const localPath = await downloadVideoToTemp(videoUrl, apiKey);
+            tempFiles.push(localPath);
+
+            const [scenes, audioResult] = await Promise.all([
+              detectScenes(localPath, 0.3),
+              analyzeVideoAudio(localPath, id),
+            ]);
+            audioResults[id] = audioResult;
+
+            const frameCounts = calculateSceneFrameCounts(scenes, 2, 12, 1.5);
+            const sceneFrameMap = new Map<number, number[]>();
+            const allTimestamps: number[] = [];
+
+            for (let i = 0; i < scenes.length; i++) {
+              const scene = scenes[i];
+              const count = frameCounts.get(i) || 3;
+              const timestamps: number[] = [];
+              for (let f = 0; f < count; f++) {
+                const t = scene.startTime + (scene.duration * (f + 1)) / (count + 1);
+                timestamps.push(t);
+                allTimestamps.push(t);
+              }
+              sceneFrameMap.set(i, timestamps);
+            }
+
+            const tmpDir = await mkdtemp(path.join(os.tmpdir(), `gis-seg-${id}-`));
+            const extractedFrames = await extractFramesAtTimestamps(
+              localPath,
+              allTimestamps,
+              id
+            );
+
+            for (const frame of extractedFrames) {
+              let sceneIndex = 0;
+              for (let i = 0; i < scenes.length; i++) {
+                if (frame.timestamp >= scenes[i].startTime && frame.timestamp < scenes[i].endTime) {
+                  sceneIndex = i;
+                  break;
+                }
+              }
+
+              const dataUrl = await fileToDataUrl(frame.imagePath);
+              analysisItems.push({
+                assetId: id,
+                url: dataUrl,
+                isFrame: true,
+                timestamp: frame.timestamp,
+                duration,
+                sceneIndex,
+              });
+            }
+
+            assetFrameCounts[id] = extractedFrames.length;
+            videoContexts.push({
+              assetId: id,
+              duration,
+              scenes,
+              sceneFrameMap,
+              extractedFrames,
+              audioSegments: audioResult.segments || [],
+              tmpDir,
+            });
+
+            await unlink(localPath).catch(() => {});
+            tempFiles.splice(tempFiles.indexOf(localPath), 1);
           }
-
-          assetFrameCounts[id] = extractedFrames.length;
-
-          // Store context for later phase
-          videoContexts.push({
-            assetId: id,
-            duration,
-            scenes,
-            sceneFrameMap,
-            extractedFrames,
-            audioSegments: audioResult.segments || [],
-            tmpDir,
-          });
-
-          // Clean up video file immediately
-          await unlink(localPath).catch(() => {});
-          tempFiles.splice(tempFiles.indexOf(localPath), 1);
         } catch (err: any) {
           console.error(`Video analysis failed for ${id}:`, err.message);
-          // Fallback: single thumbnail
           assetFrameCounts[id] = 1;
           analysisItems.push({
             assetId: id,
@@ -255,95 +264,166 @@ export async function POST(request: Request) {
         }
       } else {
         // Image: single item
-        assetFrameCounts[id] = 1;
-        analysisItems.push({
-          assetId: id,
-          url: getAssetPreviewUrl(id),
-          isFrame: false,
-        });
+        if (localOnly) {
+          // For local-only images, we need the file path for scoreImageFile
+          const previewUrl = getAssetPreviewUrl(id);
+          const tmpPath = await downloadImageToTemp(previewUrl, apiKey);
+          tempFiles.push(tmpPath);
+          analysisItems.push({
+            assetId: id,
+            url: tmpPath,
+            isFrame: false,
+            sceneIndex: 0,
+          });
+        } else {
+          assetFrameCounts[id] = 1;
+          analysisItems.push({
+            assetId: id,
+            url: getAssetPreviewUrl(id),
+            isFrame: false,
+          });
+        }
       }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 2: Batch vision analysis
+    // PHASE 2: Score analysis items
     // ═══════════════════════════════════════════════════════════════════════
-    const batches = chunkArray(analysisItems, BATCH_SIZE);
     const batchResults: {
       batchIndex: number;
       batchSize: number;
       assetIds: string[];
       status: "pending" | "processing" | "completed" | "failed";
       error?: string;
-    }[] = batches.map((batch, idx) => ({
-      batchIndex: idx,
-      batchSize: batch.length,
-      assetIds: Array.from(new Set(batch.map((item) => item.assetId))),
-      status: "pending" as const,
-    }));
+    }[] = [];
 
-    // Accumulator: per-asset per-scene frame scores
     const frameScoreAccumulator = new Map<
       string,
       Map<number, { scores: number[]; reasons: string[] }>
     >();
-
     for (const id of assetIds) {
       frameScoreAccumulator.set(id, new Map());
     }
 
-    let modelUsed = "unknown";
+    let modelUsed = localOnly ? "local-only" : "unknown";
 
-    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-      const batch = batches[batchIdx];
-      batchResults[batchIdx].status = "processing";
+    if (localOnly) {
+      // LOCAL-ONLY PATH: score each frame/image locally using sharp
+      const batchSize = 6; // Local scoring is fast, process more at once
+      const batches = chunkArray(analysisItems, batchSize);
 
-      try {
-        const assetUrls = batch.map((item) => ({
-          assetId: item.assetId,
-          url: item.url,
-        }));
-
-        const result = await analyzeMediaWithVision(assetUrls, {
-          maxImages: BATCH_SIZE,
+      for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+        const batch = batches[batchIdx];
+        batchResults.push({
+          batchIndex: batchIdx,
+          batchSize: batch.length,
+          assetIds: Array.from(new Set(batch.map((item) => item.assetId))),
+          status: "processing",
         });
 
-        modelUsed = result.modelUsed;
+        try {
+          await Promise.all(
+            batch.map(async (item) => {
+              // item.url is a local temp file path in local-only mode
+              const result = await scoreImageFile(item.url);
+              const sceneMap = frameScoreAccumulator.get(item.assetId);
+              if (!sceneMap || item.sceneIndex === undefined) return;
 
-        // Map scores back to scenes by position
-        for (let i = 0; i < result.scores.length && i < batch.length; i++) {
-          const score = result.scores[i];
-          const item = batch[i];
-          const sceneMap = frameScoreAccumulator.get(score.assetId);
-          if (!sceneMap || item.sceneIndex === undefined) continue;
+              if (!sceneMap.has(item.sceneIndex)) {
+                sceneMap.set(item.sceneIndex, { scores: [], reasons: [] });
+              }
+              const sceneData = sceneMap.get(item.sceneIndex)!;
+              sceneData.scores.push(result.overallScore);
 
-          if (!sceneMap.has(item.sceneIndex)) {
-            sceneMap.set(item.sceneIndex, { scores: [], reasons: [] });
-          }
-          const sceneData = sceneMap.get(item.sceneIndex)!;
-          sceneData.scores.push(score.score);
-          sceneData.reasons.push(...score.reasons);
+              const reasons: string[] = [];
+              if (result.brightnessScore > 70) reasons.push("Good exposure");
+              else if (result.brightnessScore < 30) reasons.push("Underexposed");
+              if (result.blurScore > 70) reasons.push("Sharp focus");
+              else if (result.blurScore < 30) reasons.push("Blurry");
+              if (result.actionScore > 60) reasons.push("Dynamic scene");
+              if (result.compositionScore > 60) reasons.push("Good composition");
+              if (reasons.length === 0) reasons.push("Acceptable quality");
+              sceneData.reasons.push(...reasons);
 
-          // US-008: Track best-scored individual frame
-          if (score.score > (bestFrame?.score ?? 0)) {
-            const ctx = videoContexts.find((c) => c.assetId === item.assetId);
-            const frame = ctx?.extractedFrames.find((f) => f.timestamp === item.timestamp);
-            if (frame) {
-              bestFrame = {
-                assetId: item.assetId,
-                timestamp: item.timestamp,
-                score: score.score,
-                imagePath: frame.imagePath,
-              };
+              // Track best frame for thumbnail
+              if (result.overallScore > (bestFrame?.score ?? 0)) {
+                bestFrame = {
+                  assetId: item.assetId,
+                  timestamp: item.timestamp ?? 0,
+                  score: result.overallScore,
+                  imagePath: item.url,
+                };
+              }
+            })
+          );
+          batchResults[batchIdx].status = "completed";
+        } catch (err: any) {
+          batchResults[batchIdx].status = "failed";
+          batchResults[batchIdx].error = err instanceof Error ? err.message : "Local scoring failed";
+        }
+      }
+    } else {
+      // LLM PATH: batch vision analysis
+      const batches = chunkArray(analysisItems, BATCH_SIZE);
+      for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+        batchResults.push({
+          batchIndex: batchIdx,
+          batchSize: batches[batchIdx].length,
+          assetIds: Array.from(new Set(batches[batchIdx].map((item) => item.assetId))),
+          status: "processing",
+        });
+      }
+
+      for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+        const batch = batches[batchIdx];
+        batchResults[batchIdx].status = "processing";
+
+        try {
+          const assetUrls = batch.map((item) => ({
+            assetId: item.assetId,
+            url: item.url,
+          }));
+
+          const result = await analyzeMediaWithVision(assetUrls, {
+            maxImages: BATCH_SIZE,
+          });
+
+          modelUsed = result.modelUsed;
+
+          for (let i = 0; i < result.scores.length && i < batch.length; i++) {
+            const score = result.scores[i];
+            const item = batch[i];
+            const sceneMap = frameScoreAccumulator.get(score.assetId);
+            if (!sceneMap || item.sceneIndex === undefined) continue;
+
+            if (!sceneMap.has(item.sceneIndex)) {
+              sceneMap.set(item.sceneIndex, { scores: [], reasons: [] });
+            }
+            const sceneData = sceneMap.get(item.sceneIndex)!;
+            sceneData.scores.push(score.score);
+            sceneData.reasons.push(...score.reasons);
+
+            if (score.score > (bestFrame?.score ?? 0)) {
+              const ctx = videoContexts.find((c) => c.assetId === item.assetId);
+              const frame = ctx?.extractedFrames.find((f) => f.timestamp === item.timestamp);
+              if (frame) {
+                bestFrame = {
+                  assetId: item.assetId,
+                  timestamp: item.timestamp,
+                  score: score.score,
+                  imagePath: frame.imagePath,
+                };
+              }
             }
           }
-        }
 
-        batchResults[batchIdx].status = "completed";
-      } catch (err: any) {
-        const errMsg = err instanceof Error ? err.message : "Batch analysis failed";
-        batchResults[batchIdx].status = "failed";
-        batchResults[batchIdx].error = errMsg;
-        console.error(`Batch ${batchIdx} failed:`, errMsg);
+          batchResults[batchIdx].status = "completed";
+        } catch (err: any) {
+          const errMsg = err instanceof Error ? err.message : "Batch analysis failed";
+          batchResults[batchIdx].status = "failed";
+          batchResults[batchIdx].error = errMsg;
+          console.error(`Batch ${batchIdx} failed:`, errMsg);
+        }
       }
     }
 
@@ -364,7 +444,6 @@ export async function POST(request: Request) {
       segments?: ProductionSegment[];
     }[] = [];
 
-    // Vision + Audio blending weights
     const VISION_WEIGHT = 0.5;
     const AUDIO_WEIGHT = 0.3;
     const MOTION_WEIGHT = 0.2;
@@ -374,15 +453,12 @@ export async function POST(request: Request) {
       const sceneMap = frameScoreAccumulator.get(assetId);
       const audioResult = audioResults[assetId];
 
-      // Build audio-by-scene
       const audioByScene = mapAudioToScenes(scenes, audioSegments);
 
-      // Build SceneScore[] with vision + audio + motion
       const sceneScores: SceneScore[] = scenes.map((scene, i) => {
         const sceneAudio = audioByScene.get(i) || { segments: [], keywordHits: [], avgConfidence: 0 };
         const { score: audioScore, keywordCount } = computeSceneAudioScore(sceneAudio, scene.duration);
 
-        // Vision: average frame scores for this scene
         let visionScore = 0;
         let frameCount = 0;
         const allReasons: string[] = [];
@@ -396,7 +472,6 @@ export async function POST(request: Request) {
 
         const topReasons = Array.from(new Set(allReasons)).slice(0, 3);
 
-        // Combined score
         const combinedScore = Math.round(
           visionScore * VISION_WEIGHT +
           audioScore * AUDIO_WEIGHT +
@@ -415,11 +490,9 @@ export async function POST(request: Request) {
         };
       });
 
-      // Build production segments
       const segments = buildProductionSegments(assetId, scenes, sceneScores, 55);
       assetSegments[assetId] = segments;
 
-      // Asset-level score: best segment score, or average of top 2
       let assetScore = 50;
       if (segments.length > 0) {
         assetScore = segments.length === 1
@@ -427,7 +500,6 @@ export async function POST(request: Request) {
           : Math.round((segments[0].score + segments[1].score) / 2);
       }
 
-      // Build reasons from segments
       const allReasons: string[] = segments.flatMap((s) => s.reasons);
       const uniqueReasons = Array.from(new Set(allReasons)).slice(0, 5);
 
@@ -491,9 +563,9 @@ export async function POST(request: Request) {
           assetId: id,
           score: 50,
           rank: finalScores.length + 1,
-          reasons: ["No AI analysis available — default ranking applied"],
+          reasons: ["No analysis available — default ranking applied"],
           framesAnalyzed: assetFrameCounts[id] || 0,
-          weighting: "Fallback (no vision data)",
+          weighting: "Fallback (no data)",
         });
       }
     }
@@ -502,55 +574,59 @@ export async function POST(request: Request) {
       s.rank = i + 1;
     });
 
-    const topIds = finalScores.slice(0, 10).map((s) => s.assetId);
-    const completedBatches = batchResults.filter((b) => b.status === "completed").length;
-    const failedBatches = batchResults.filter((b) => b.status === "failed").length;
-
-    // US-008: Save best-scored frame as event thumbnail
+    // US-008: Persist best frame as event thumbnail
     if (bestFrame && eventId) {
       try {
-        const thumbsDir = path.join(process.env.COMPOSITION_OUTPUT_DIR || "/tmp/gis-compositions", "thumbnails");
-        await mkdir(thumbsDir, { recursive: true });
-        const ext = path.extname(bestFrame.imagePath);
-        const dest = path.join(thumbsDir, `${eventId}_thumb${ext || ".jpg"}`);
-        await copyFile(bestFrame.imagePath, dest);
-        // Persist relative URL to event
+        const thumbnailsDir = path.join(process.cwd(), "public", "thumbnails");
+        await mkdir(thumbnailsDir, { recursive: true });
+        const thumbnailPath = path.join(thumbnailsDir, `${eventId}.jpg`);
+        await copyFile(bestFrame.imagePath, thumbnailPath);
         await prisma.event.update({
           where: { id: eventId },
-          data: { thumbnailUrl: `/thumbnails/${eventId}_thumb${ext || ".jpg"}` },
+          data: { thumbnailUrl: `/thumbnails/${eventId}.jpg` },
         });
+        console.log(`[US-008] Saved thumbnail for event ${eventId}: score ${bestFrame.score}`);
       } catch (thumbErr) {
-        console.error("US-008: Failed to save thumbnail:", thumbErr);
+        console.warn("[US-008] Failed to save thumbnail:", thumbErr);
       }
     }
+
+    const completedBatches = batchResults.filter(
+      (b) => b.status === "completed"
+    ).length;
+    const failedBatches = batchResults.filter(
+      (b) => b.status === "failed"
+    ).length;
 
     return NextResponse.json({
       success: true,
       scores: finalScores,
-      topIds,
+      topIds: finalScores.slice(0, 10).map((s) => s.assetId),
       modelUsed,
-      visionConfigured: true,
-      eventId: eventId || null,
+      visionConfigured: !localOnly ? isVisionConfigured() : true,
+      eventId,
       batches: batchResults,
-      totalBatches: batches.length,
+      totalBatches: batchResults.length,
       completedBatches,
       failedBatches,
-      totalAssetsAnalyzed: assetIds.length,
+      totalAssetsAnalyzed: finalScores.filter((s) => s.score > 0).length,
       assetFrameCounts,
-      samplingStrategy:
-        "Scene-aware: ffmpeg scene detection + dense per-scene frame sampling (1-2s intervals)",
-      weightingStrategy:
-        "Combined scoring: 50% vision + 30% audio (STT keywords) + 20% motion (scene intensity). Multi-segment extraction per video.",
+      samplingStrategy: localOnly
+        ? "Local-only: sharp-based brightness, blur, edge, and entropy scoring. No LLM calls."
+        : "Scene-aware: ffmpeg scene detection + dense per-scene frame sampling (1-2s intervals)",
+      weightingStrategy: "Combined scoring: 50% vision + 30% audio (STT keywords) + 20% motion (scene intensity). Multi-segment extraction per video.",
       segments: assetSegments,
+      localOnly,
     });
-  } catch (error) {
-    console.error("Vision batch analysis error:", error);
-    const errMsg = error instanceof Error ? error.message : "Analysis failed";
+  } catch (err: any) {
+    console.error("[BATCH RANK] Fatal error:", err);
     return NextResponse.json(
       {
-        error: errMsg,
+        success: false,
+        error: err instanceof Error ? err.message : "Internal server error",
         scores: fallbackRanking(assetIds).scores,
         topIds: assetIds.slice(0, 10),
+        modelUsed: "error-fallback",
         visionConfigured: isVisionConfigured(),
         batches: [],
         totalBatches: 0,
@@ -563,15 +639,9 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   } finally {
-    // Cleanup all temp files
-    for (const file of tempFiles) {
-      await unlink(file).catch(() => {});
-    }
-    for (const ctx of videoContexts) {
-      for (const frame of ctx.extractedFrames) {
-        await unlink(frame.imagePath).catch(() => {});
-      }
-      await rmdir(ctx.tmpDir).catch(() => {});
+    // Cleanup temp files
+    for (const tmpFile of tempFiles) {
+      await unlink(tmpFile).catch(() => {});
     }
   }
 }
