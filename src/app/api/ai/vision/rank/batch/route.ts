@@ -11,6 +11,20 @@ import * as pathModule from "path";
 import * as osModule from "os";
 
 import { analyzeVideoAudio, AudioAnalysisResult } from "@/lib/audio-analysis";
+import {
+  detectScenes,
+  calculateSceneFrameCounts,
+  extractFramesAtTimestamps,
+  mapAudioToScenes,
+  computeSceneAudioScore,
+  classifySceneType,
+  getSegmentDuration,
+  buildProductionSegments,
+  type Scene,
+  type AudioSegment,
+  type SceneScore,
+  type ProductionSegment,
+} from "@/lib/video-segmentation";
 
 // Need these for route code
 const { spawn } = childProcess;
@@ -19,14 +33,10 @@ const path = pathModule;
 const os = osModule;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// BATCH VISION RANKING — Variable frame density: dense in core, sparse at edges
+// BATCH VISION RANKING — Scene-aware segmentation with multi-segment extraction
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const BATCH_SIZE = 3;
-const EDGE_SECONDS_PER_FRAME = 2.0;   // Slower sampling at edges (intro/outro)
-const CORE_SECONDS_PER_FRAME = 1.0;   // Faster sampling in core content
-const MIN_VIDEO_FRAMES = 3;
-const MAX_VIDEO_FRAMES = 24;           // Slightly higher cap since core is denser
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -38,7 +48,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 
 /**
  * Download a video from Immich to a temp file so ffmpeg can process it.
- * Immich requires x-api-key header which ffmpeg can't send directly.
  */
 async function downloadVideoToTemp(videoUrl: string, apiKey: string): Promise<string> {
   const tmpFile = path.join(os.tmpdir(), `gis-video-${Date.now()}.mp4`);
@@ -54,143 +63,45 @@ async function downloadVideoToTemp(videoUrl: string, apiKey: string): Promise<st
 }
 
 /**
- * Extract frames from a local video file using ffmpeg.
- * Returns frame items with data URLs ready for vision model.
+ * Convert an image file to a base64 data URL.
  */
-/**
- * Extract frames with variable density: more frames in the core (middle 60%),
- * fewer frames at the edges (first/last 20%). This captures the best content
- * while avoiding intro/outro noise.
- */
-function computeVariableDensityTimestamps(durationSec: number): number[] {
-  const edgeStartEnd = durationSec * 0.2; // First and last 20%
-  const coreStart = edgeStartEnd;
-  const coreEnd = durationSec - edgeStartEnd;
-  const coreDuration = coreEnd - coreStart;
-
-  // Calculate how many frames each zone gets
-  const edgeFrameCount = Math.max(1, Math.floor(edgeStartEnd / EDGE_SECONDS_PER_FRAME));
-  const coreFrameCount = Math.max(2, Math.floor(coreDuration / CORE_SECONDS_PER_FRAME));
-
-  // Ensure total doesn't exceed max
-  let totalFrames = edgeFrameCount * 2 + coreFrameCount;
-  if (totalFrames > MAX_VIDEO_FRAMES) {
-    // Reduce proportionally, but keep at least 2 core frames
-    const scale = MAX_VIDEO_FRAMES / totalFrames;
-    const scaledCore = Math.max(2, Math.floor(coreFrameCount * scale));
-    const remaining = MAX_VIDEO_FRAMES - scaledCore;
-    const scaledEdge = Math.max(1, Math.floor(remaining / 2));
-    totalFrames = scaledEdge * 2 + scaledCore;
-  }
-  if (totalFrames < MIN_VIDEO_FRAMES) {
-    totalFrames = MIN_VIDEO_FRAMES;
-  }
-
-  const timestamps: number[] = [];
-
-  // Edge zone: first 20% (frames spread across 0 to edgeStartEnd)
-  for (let i = 0; i < edgeFrameCount; i++) {
-    const pct = (i + 1) / (edgeFrameCount + 1);
-    timestamps.push(edgeStartEnd * pct * 0.8); // slightly bias away from very start
-  }
-
-  // Core zone: middle 60% (denser sampling)
-  for (let i = 0; i < coreFrameCount; i++) {
-    const pct = (i + 1) / (coreFrameCount + 1);
-    timestamps.push(coreStart + coreDuration * pct);
-  }
-
-  // Edge zone: last 20% (frames spread across coreEnd to duration)
-  for (let i = 0; i < edgeFrameCount; i++) {
-    const pct = (i + 1) / (edgeFrameCount + 1);
-    timestamps.push(coreEnd + edgeStartEnd * pct * 0.2); // slightly bias away from very end
-  }
-
-  return timestamps.sort((a, b) => a - b);
+async function fileToDataUrl(imagePath: string): Promise<string> {
+  const buf = await readFile(imagePath);
+  return `data:image/jpeg;base64,${buf.toString("base64")}`;
 }
 
-async function extractVideoFrames(
-  localVideoPath: string,
-  assetId: string,
-  durationSec: number
-): Promise<{ assetId: string; url: string; frameIndex: number; timestamp: number }[]> {
-  const timestamps = computeVariableDensityTimestamps(durationSec);
-  const frameCount = timestamps.length;
-
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gis-frames-"));
-  const framePaths: string[] = [];
-
-  // Extract frames with ffmpeg — use fast seek then accurate decode
-  await Promise.all(
-    timestamps.map((ts, idx) => {
-      const outPath = path.join(tmpDir, `${assetId}_f${idx}.jpg`);
-      framePaths.push(outPath);
-      return new Promise<void>((resolve, reject) => {
-        const ffmpeg = spawn("ffmpeg", [
-          "-ss", String(ts),
-          "-i", localVideoPath,
-          "-vframes", "1",
-          "-q:v", "2",
-          "-y",
-          outPath,
-        ]);
-        ffmpeg.on("close", (code: number | null) => {
-          if (code === 0) resolve();
-          else reject(new Error(`ffmpeg frame ${idx} failed: code ${code}`));
-        });
-        ffmpeg.on("error", reject);
-      });
-    })
-  );
-
-  // Convert to data URLs
-  const frames = await Promise.all(
-    framePaths.map(async (fp, idx) => {
-      const buf = await readFile(fp);
-      const base64 = buf.toString("base64");
-      return {
-        assetId,
-        url: `data:image/jpeg;base64,${base64}`,
-        frameIndex: idx,
-        timestamp: timestamps[idx],
-      };
-    })
-  );
-
-  // Cleanup
-  await Promise.all(framePaths.map((fp) => unlink(fp).catch(() => {})));
-  await rmdir(tmpDir).catch(() => {});
-
-  return frames;
-}
-
-// ─── Weighting Strategy ───────────────────────────────────────────────────────
-// Each frame's weight is based on temporal position:
-//   • First 20% and last 20% of video: weight 0.7 (often setup/teardown)
-//   • Middle 60%: weight 1.0 (core content)
-// This prevents an intro title card or outro from dragging the average down.
-function computeFrameWeight(timestamp: number, duration: number): number {
-  if (duration <= 0) return 1.0;
-  const pct = timestamp / duration;
-  if (pct < 0.2 || pct > 0.8) return 0.7;
-  return 1.0;
-}
-
-interface AnalysisItem {
+interface FrameItem {
   assetId: string;
   url: string;
   isFrame: boolean;
   frameIndex?: number;
   timestamp?: number;
-  duration?: number; // set for video frames so weight can be computed
+  duration?: number;
+  sceneIndex?: number; // which scene this frame belongs to
 }
 
-// ─── POST handler ─────────────────────────────────────────────────────────────
+interface VideoAnalysisContext {
+  assetId: string;
+  duration: number;
+  scenes: Scene[];
+  sceneFrameMap: Map<number, number[]>; // sceneIndex -> timestamps
+  extractedFrames: Array<{ timestamp: number; imagePath: string }>;
+  audioSegments: AudioSegment[];
+  tmpDir: string;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POST handler
+// ═══════════════════════════════════════════════════════════════════════════════
 
 export async function POST(request: Request) {
   let assetIds: string[] = [];
   let assetTypes: Record<string, "IMAGE" | "VIDEO"> = {};
   let assetDurations: Record<string, number> = {};
+
+  // Track temp resources for cleanup
+  const videoContexts: VideoAnalysisContext[] = [];
+  const tempFiles: string[] = [];
 
   try {
     const body = await request.json();
@@ -220,59 +131,109 @@ export async function POST(request: Request) {
         failedBatches: 0,
         totalAssetsAnalyzed: 0,
         assetFrameCounts: {},
+        segments: {},
       });
     }
 
     const apiKey = process.env.IMMICH_API_KEY || "";
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 1: Build analysis item list (images = 1 item, videos = N frames + audio)
+    // PHASE 1: Build analysis items (images = 1, videos = scene-aware frames)
     // ═══════════════════════════════════════════════════════════════════════
-    const analysisItems: AnalysisItem[] = [];
+    const analysisItems: FrameItem[] = [];
     const assetFrameCounts: Record<string, number> = {};
     const audioResults: Record<string, AudioAnalysisResult> = {};
 
     for (const id of assetIds) {
       const type = assetTypes[id] || "IMAGE";
+
       if (type === "VIDEO") {
-        const duration = assetDurations[id] || 5; // fallback 5s if unknown
-        // Estimate frame count using same variable-density logic as extraction
-        const edgeStartEnd = duration * 0.2;
-        const coreDuration = duration - edgeStartEnd * 2;
-        const edgeCount = Math.max(1, Math.floor(edgeStartEnd / EDGE_SECONDS_PER_FRAME));
-        const coreCount = Math.max(2, Math.floor(coreDuration / CORE_SECONDS_PER_FRAME));
-        const frameCount = Math.min(Math.max(edgeCount * 2 + coreCount, MIN_VIDEO_FRAMES), MAX_VIDEO_FRAMES);
-        assetFrameCounts[id] = frameCount;
+        const duration = assetDurations[id] || 5;
 
         try {
-          // Download video once, use for both frame extraction + audio analysis
+          // Download video once
           const videoUrl = getAssetOriginalUrl(id);
           const localPath = await downloadVideoToTemp(videoUrl, apiKey);
+          tempFiles.push(localPath);
 
-          // Run vision frame extraction + audio STT in parallel
-          const [frames, audioResult] = await Promise.all([
-            extractVideoFrames(localPath, id, duration),
+          // Parallel: scene detection + audio analysis
+          const [scenes, audioResult] = await Promise.all([
+            detectScenes(localPath, 0.3),
             analyzeVideoAudio(localPath, id),
           ]);
 
           audioResults[id] = audioResult;
 
-          for (const frame of frames) {
+          // Calculate frame counts per scene
+          const frameCounts = calculateSceneFrameCounts(scenes, 2, 12, 1.5);
+
+          // Build timestamp list per scene
+          const sceneFrameMap = new Map<number, number[]>();
+          const allTimestamps: number[] = [];
+
+          for (let i = 0; i < scenes.length; i++) {
+            const scene = scenes[i];
+            const count = frameCounts.get(i) || 3;
+            const timestamps: number[] = [];
+
+            for (let f = 0; f < count; f++) {
+              const t = scene.startTime + (scene.duration * (f + 1)) / (count + 1);
+              timestamps.push(t);
+              allTimestamps.push(t);
+            }
+
+            sceneFrameMap.set(i, timestamps);
+          }
+
+          // Extract frames
+          const tmpDir = await mkdtemp(path.join(os.tmpdir(), `gis-seg-${id}-`));
+          const extractedFrames = await extractFramesAtTimestamps(
+            localPath,
+            allTimestamps,
+            id
+          );
+
+          // Convert to data URLs and build analysis items
+          for (const frame of extractedFrames) {
+            // Find which scene this frame belongs to
+            let sceneIndex = 0;
+            for (let i = 0; i < scenes.length; i++) {
+              if (frame.timestamp >= scenes[i].startTime && frame.timestamp < scenes[i].endTime) {
+                sceneIndex = i;
+                break;
+              }
+            }
+
+            const dataUrl = await fileToDataUrl(frame.imagePath);
             analysisItems.push({
-              assetId: frame.assetId,
-              url: frame.url,
+              assetId: id,
+              url: dataUrl,
               isFrame: true,
-              frameIndex: frame.frameIndex,
               timestamp: frame.timestamp,
               duration,
+              sceneIndex,
             });
           }
 
-          // Remove temp video file immediately after both extractions
+          assetFrameCounts[id] = extractedFrames.length;
+
+          // Store context for later phase
+          videoContexts.push({
+            assetId: id,
+            duration,
+            scenes,
+            sceneFrameMap,
+            extractedFrames,
+            audioSegments: audioResult.segments || [],
+            tmpDir,
+          });
+
+          // Clean up video file immediately
           await unlink(localPath).catch(() => {});
+          tempFiles.splice(tempFiles.indexOf(localPath), 1);
         } catch (err: any) {
           console.error(`Video analysis failed for ${id}:`, err.message);
-          // Fallback: use thumbnail as single frame, no audio
+          // Fallback: single thumbnail
           assetFrameCounts[id] = 1;
           analysisItems.push({
             assetId: id,
@@ -290,7 +251,7 @@ export async function POST(request: Request) {
           };
         }
       } else {
-        // Image: single item, no audio
+        // Image: single item
         assetFrameCounts[id] = 1;
         analysisItems.push({
           assetId: id,
@@ -301,7 +262,7 @@ export async function POST(request: Request) {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 2: Chunk into batches and analyze
+    // PHASE 2: Batch vision analysis
     // ═══════════════════════════════════════════════════════════════════════
     const batches = chunkArray(analysisItems, BATCH_SIZE);
     const batchResults: {
@@ -317,26 +278,14 @@ export async function POST(request: Request) {
       status: "pending" as const,
     }));
 
-    // Accumulator: per-asset weighted scores
-    const accumulator: Map<
+    // Accumulator: per-asset per-scene frame scores
+    const frameScoreAccumulator = new Map<
       string,
-      {
-        weightedScoreSum: number;
-        weightSum: number;
-        reasons: string[];
-        batchCount: number;
-        frameCount: number;
-      }
-    > = new Map();
+      Map<number, { scores: number[]; reasons: string[] }>
+    >();
 
     for (const id of assetIds) {
-      accumulator.set(id, {
-        weightedScoreSum: 0,
-        weightSum: 0,
-        reasons: [],
-        batchCount: 0,
-        frameCount: 0,
-      });
+      frameScoreAccumulator.set(id, new Map());
     }
 
     let modelUsed = "unknown";
@@ -357,22 +306,19 @@ export async function POST(request: Request) {
 
         modelUsed = result.modelUsed;
 
-        // Merge scores with temporal weighting
-        for (const score of result.scores) {
-          const item = batch.find((i) => i.assetId === score.assetId);
-          const current = accumulator.get(score.assetId);
-          if (!current) continue;
+        // Map scores back to scenes by position
+        for (let i = 0; i < result.scores.length && i < batch.length; i++) {
+          const score = result.scores[i];
+          const item = batch[i];
+          const sceneMap = frameScoreAccumulator.get(score.assetId);
+          if (!sceneMap || item.sceneIndex === undefined) continue;
 
-          let weight = 1.0;
-          if (item?.isFrame && item.duration && item.timestamp !== undefined) {
-            weight = computeFrameWeight(item.timestamp, item.duration);
+          if (!sceneMap.has(item.sceneIndex)) {
+            sceneMap.set(item.sceneIndex, { scores: [], reasons: [] });
           }
-
-          current.weightedScoreSum += score.score * weight;
-          current.weightSum += weight;
-          current.reasons.push(...score.reasons);
-          current.batchCount++;
-          current.frameCount++;
+          const sceneData = sceneMap.get(item.sceneIndex)!;
+          sceneData.scores.push(score.score);
+          sceneData.reasons.push(...score.reasons);
         }
 
         batchResults[batchIdx].status = "completed";
@@ -385,8 +331,9 @@ export async function POST(request: Request) {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 3: Compute final weighted scores (vision + audio blend)
+    // PHASE 3: Build scene scores and production segments
     // ═══════════════════════════════════════════════════════════════════════
+    const assetSegments: Record<string, ProductionSegment[]> = {};
     const finalScores: {
       assetId: string;
       score: number;
@@ -397,46 +344,118 @@ export async function POST(request: Request) {
       audioScore?: number;
       transcriptPreview?: string;
       keywordHits?: string[];
+      segments?: ProductionSegment[];
     }[] = [];
 
     // Vision + Audio blending weights
-    const VISION_WEIGHT = 0.7;
+    const VISION_WEIGHT = 0.5;
     const AUDIO_WEIGHT = 0.3;
+    const MOTION_WEIGHT = 0.2;
 
-    for (const [id, data] of Array.from(accumulator)) {
-      if (data.weightSum > 0) {
-        const visionScore = data.weightedScoreSum / data.weightSum;
-        const audioResult = audioResults[id];
-        const hasAudio = audioResult && audioResult.audioScore > 0;
+    for (const ctx of videoContexts) {
+      const { assetId, scenes, sceneFrameMap, audioSegments } = ctx;
+      const sceneMap = frameScoreAccumulator.get(assetId);
+      const audioResult = audioResults[assetId];
 
-        let blendedScore = visionScore;
-        let weightingNote: string;
+      // Build audio-by-scene
+      const audioByScene = mapAudioToScenes(scenes, audioSegments);
 
-        if (hasAudio) {
-          blendedScore = visionScore * VISION_WEIGHT + audioResult.audioScore * AUDIO_WEIGHT;
-          weightingNote = `Vision ${(VISION_WEIGHT * 100).toFixed(0)}% + Audio ${(AUDIO_WEIGHT * 100).toFixed(0)}% — ${audioResult.keywordCount} keyword hits`;
-        } else {
-          weightingNote = `Vision-only (no audio data)`;
+      // Build SceneScore[] with vision + audio + motion
+      const sceneScores: SceneScore[] = scenes.map((scene, i) => {
+        const sceneAudio = audioByScene.get(i) || { segments: [], keywordHits: [], avgConfidence: 0 };
+        const { score: audioScore, keywordCount } = computeSceneAudioScore(sceneAudio, scene.duration);
+
+        // Vision: average frame scores for this scene
+        let visionScore = 0;
+        let frameCount = 0;
+        const allReasons: string[] = [];
+
+        const frameData = sceneMap?.get(i);
+        if (frameData && frameData.scores.length > 0) {
+          visionScore = frameData.scores.reduce((a, b) => a + b, 0) / frameData.scores.length;
+          frameCount = frameData.scores.length;
+          allReasons.push(...frameData.reasons);
         }
 
-        const uniqueReasons = Array.from(new Set(data.reasons)).slice(0, 5);
-        const frameCount = assetFrameCounts[id] || data.frameCount;
+        const topReasons = Array.from(new Set(allReasons)).slice(0, 3);
 
-        // If audio keywords found, add them as a reason
-        if (hasAudio && audioResult.keywordHits.length > 0) {
-          uniqueReasons.push(`Audio: ${audioResult.keywordHits.slice(0, 3).join(", ")}`);
+        // Combined score
+        const combinedScore = Math.round(
+          visionScore * VISION_WEIGHT +
+          audioScore * AUDIO_WEIGHT +
+          scene.avgMotion * 100 * MOTION_WEIGHT
+        );
+
+        return {
+          sceneIndex: i,
+          visionScore: Math.round(visionScore),
+          audioScore,
+          motionScore: scene.avgMotion,
+          combinedScore,
+          frameCount,
+          keywordHits: sceneAudio.keywordHits,
+          topReasons,
+        };
+      });
+
+      // Build production segments
+      const segments = buildProductionSegments(assetId, scenes, sceneScores, 55);
+      assetSegments[assetId] = segments;
+
+      // Asset-level score: best segment score, or average of top 2
+      let assetScore = 50;
+      if (segments.length > 0) {
+        assetScore = segments.length === 1
+          ? segments[0].score
+          : Math.round((segments[0].score + segments[1].score) / 2);
+      }
+
+      // Build reasons from segments
+      const allReasons: string[] = segments.flatMap((s) => s.reasons);
+      const uniqueReasons = Array.from(new Set(allReasons)).slice(0, 5);
+
+      if (segments.length > 0) {
+        uniqueReasons.unshift(`${segments.length} production segment${segments.length > 1 ? "s" : ""} found`);
+      }
+
+      const hasAudio = audioResult && audioResult.audioScore > 0;
+
+      finalScores.push({
+        assetId,
+        score: assetScore,
+        rank: 0,
+        reasons: uniqueReasons,
+        framesAnalyzed: assetFrameCounts[assetId] || 0,
+        weighting: `Scene-aware: ${scenes.length} scenes, ${VISION_WEIGHT * 100}% vision + ${AUDIO_WEIGHT * 100}% audio + ${MOTION_WEIGHT * 100}% motion`,
+        audioScore: hasAudio ? audioResult.audioScore : undefined,
+        transcriptPreview: hasAudio ? audioResult.transcript.slice(0, 80) + (audioResult.transcript.length > 80 ? "..." : "") : undefined,
+        keywordHits: hasAudio ? audioResult.keywordHits : undefined,
+        segments,
+      });
+    }
+
+    // Add image scores (single-frame, no segments)
+    for (const id of assetIds) {
+      if (assetTypes[id] !== "VIDEO" && !finalScores.some((s) => s.assetId === id)) {
+        const sceneMap = frameScoreAccumulator.get(id);
+        let score = 50;
+        let reasons: string[] = ["Image asset — single-frame analysis"];
+
+        if (sceneMap) {
+          const scene0 = sceneMap.get(0);
+          if (scene0 && scene0.scores.length > 0) {
+            score = Math.round(scene0.scores.reduce((a, b) => a + b, 0) / scene0.scores.length);
+            reasons = Array.from(new Set(scene0.reasons)).slice(0, 5);
+          }
         }
 
         finalScores.push({
           assetId: id,
-          score: Math.round(blendedScore),
+          score,
           rank: 0,
-          reasons: uniqueReasons.slice(0, 5),
-          framesAnalyzed: frameCount,
-          weighting: frameCount > 1 ? `Weighted mean: edge frames ×0.7, core frames ×1.0. ${weightingNote}` : `Single-frame. ${weightingNote}`,
-          audioScore: hasAudio ? audioResult.audioScore : undefined,
-          transcriptPreview: hasAudio ? audioResult.transcript.slice(0, 80) + (audioResult.transcript.length > 80 ? "..." : "") : undefined,
-          keywordHits: hasAudio ? audioResult.keywordHits : undefined,
+          reasons,
+          framesAnalyzed: 1,
+          weighting: "Single-frame image analysis",
         });
       }
     }
@@ -484,9 +503,10 @@ export async function POST(request: Request) {
       totalAssetsAnalyzed: assetIds.length,
       assetFrameCounts,
       samplingStrategy:
-        "Variable density: edge zones (first/last 20%) at 1 frame / 2.0s, core (middle 60%) at 1 frame / 1.0s",
+        "Scene-aware: ffmpeg scene detection + dense per-scene frame sampling (1-2s intervals)",
       weightingStrategy:
-        "Edge frames (first/last 20%) weighted 0.7×, core frames weighted 1.0×. Scores are weighted averages.",
+        "Combined scoring: 50% vision + 30% audio (STT keywords) + 20% motion (scene intensity). Multi-segment extraction per video.",
+      segments: assetSegments,
     });
   } catch (error) {
     console.error("Vision batch analysis error:", error);
@@ -503,8 +523,20 @@ export async function POST(request: Request) {
         failedBatches: 0,
         totalAssetsAnalyzed: 0,
         assetFrameCounts: {},
+        segments: {},
       },
       { status: 500 }
     );
+  } finally {
+    // Cleanup all temp files
+    for (const file of tempFiles) {
+      await unlink(file).catch(() => {});
+    }
+    for (const ctx of videoContexts) {
+      for (const frame of ctx.extractedFrames) {
+        await unlink(frame.imagePath).catch(() => {});
+      }
+      await rmdir(ctx.tmpDir).catch(() => {});
+    }
   }
 }

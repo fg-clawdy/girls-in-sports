@@ -28,6 +28,7 @@ interface ImmichAsset {
   type: string;
   originalFileName: string;
   fileCreatedAt: string;
+  duration?: string; // ISO 8601 duration for videos, e.g. "PT00H00M05S"
   exifInfo?: {
     city?: string;
     description?: string;
@@ -66,6 +67,14 @@ export default function EventPage() {
       audioScore?: number;
       transcriptPreview?: string;
       keywordHits?: string[];
+      segments?: Array<{
+        startTime: number;
+        endTime: number;
+        duration: number;
+        estimatedType: string;
+        score: number;
+        reasons: string[];
+      }>;
     }>;
     topIds: string[];
     modelUsed: string;
@@ -737,6 +746,33 @@ export default function EventPage() {
                                 >
                                   {kw}
                                 </span>
+                              ))}
+                            </div>
+                          )}
+                          {score.segments && score.segments.length > 0 && (
+                            <div className="mb-2 space-y-1.5">
+                              {score.segments.map((seg, i) => (
+                                <div
+                                  key={i}
+                                  className="flex items-center gap-2 text-[11px] bg-zinc-50 border border-zinc-100 rounded px-2 py-1"
+                                >
+                                  <span className={`
+                                    px-1.5 py-0.5 rounded text-[10px] font-medium
+                                    ${seg.estimatedType === "action" ? "bg-orange-100 text-orange-700" : ""}
+                                    ${seg.estimatedType === "speech" ? "bg-green-100 text-green-700" : ""}
+                                    ${seg.estimatedType === "mixed" ? "bg-blue-100 text-blue-700" : ""}
+                                    ${seg.estimatedType === "montage" ? "bg-zinc-200 text-zinc-600" : ""}
+                                  `}>
+                                    {seg.estimatedType}
+                                  </span>
+                                  <span className="text-zinc-500 font-mono">
+                                    {Math.floor(seg.startTime / 60)}:{String(Math.floor(seg.startTime % 60)).padStart(2, "0")}
+                                    &ndash;
+                                    {Math.floor(seg.endTime / 60)}:{String(Math.floor(seg.endTime % 60)).padStart(2, "0")}
+                                  </span>
+                                  <span className="text-zinc-400">({seg.duration.toFixed(1)}s)</span>
+                                  <span className="text-zinc-600 ml-auto">score {seg.score}</span>
+                                </div>
                               ))}
                             </div>
                           )}
