@@ -208,6 +208,21 @@ model Job {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// US-002: Push Subscription table
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userId    String?
+  createdAt DateTime @default(now())
+
+  @@map("push_subscriptions")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // US-014: Lightweight Local Pre-Filter Model
 // Phase A: Fast image analysis using sharp + simple heuristics
 // Phase B (future): ONNX runtime with a distilled vision model

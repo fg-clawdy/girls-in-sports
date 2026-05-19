@@ -2,6 +2,7 @@ import { PrismaClient, JobType, JobStatus } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { createServer, IncomingMessage, ServerResponse } from "http";
+import { sendPushNotification } from "./push";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -85,7 +86,7 @@ async function processJob(job: {
   await handler(job.payload);
 }
 
-async function markDone(jobId: string) {
+async function markDone(jobId: string, jobType: JobType, payload: unknown) {
   await prisma.job.update({
     where: { id: jobId },
     data: {
@@ -94,6 +95,62 @@ async function markDone(jobId: string) {
       error: null,
     },
   });
+
+  // Send push notifications for stage-completing job types
+  const stageCompletingTypes: JobType[] = [
+    JobType.SCORE_CLIP,
+    JobType.DIRECT_SCRIPT,
+    JobType.RENDER_PROXY,
+    JobType.RENDER_FINAL,
+  ];
+
+  if (stageCompletingTypes.includes(jobType)) {
+    const pl = (payload ?? {}) as Record<string, unknown>;
+    const eventName = (pl.eventName as string) || "Your event";
+
+    let title = "Girls In Sports";
+    let body = "A background job completed.";
+    let url = "/";
+
+    switch (jobType) {
+      case JobType.SCORE_CLIP:
+        // Only notify when all clips scored — check via parentJobId
+        if (pl.parentJobId) {
+          const pending = await prisma.job.count({
+            where: {
+              parentJobId: pl.parentJobId as string,
+              status: { not: JobStatus.DONE },
+            },
+          });
+          if (pending > 0) return; // Still scoring other clips
+        }
+        title = "Footage Ready";
+        body = `${eventName} footage is ready — clips scored and tagged.`;
+        url = pl.eventId ? `/events/${pl.eventId}/curate` : "/";
+        break;
+      case JobType.DIRECT_SCRIPT:
+        title = "Script Ready";
+        body = `Your campaign script for ${eventName} is ready.`;
+        url = pl.campaignId ? `/campaigns/${pl.campaignId}/preview` : "/";
+        break;
+      case JobType.RENDER_PROXY:
+        title = "Rough Draft Ready";
+        body = `Your rough draft for ${eventName} is ready to preview.`;
+        url = pl.campaignId ? `/campaigns/${pl.campaignId}/preview` : "/";
+        break;
+      case JobType.RENDER_FINAL:
+        title = "Final Render Ready";
+        body = `Your campaign video for ${eventName} is ready to download.`;
+        url = pl.campaignId ? `/campaigns/${pl.campaignId}/download` : "/";
+        break;
+    }
+
+    try {
+      await sendPushNotification(null, { title, body, url });
+    } catch (err) {
+      console.error("[worker] Push notification failed:", err);
+    }
+  }
 }
 
 async function markFailed(jobId: string, error: string, attempts: number, maxAttempts: number) {
@@ -136,7 +193,7 @@ export async function startWorker() {
         console.log(`[worker] Claimed job ${job.id} (${job.type})`);
         try {
           await processJob(job);
-          await markDone(job.id);
+          await markDone(job.id, job.type as JobType, job.payload);
           console.log(`[worker] Job ${job.id} completed`);
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
