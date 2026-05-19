@@ -182,6 +182,24 @@ function runFFmpeg(args: string[]): Promise<void> {
   });
 }
 
+// Probe actual video duration via ffprobe
+async function probeDuration(filePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    const proc = spawn("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      filePath,
+    ], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    proc.stdout.on("data", (d) => (out += d));
+    proc.on("close", () => {
+      const dur = parseFloat(out.trim());
+      resolve(isNaN(dur) ? 0 : dur);
+    });
+  });
+}
+
 export async function executeVideo(
   script: VideoScript,
   resultId: string
@@ -222,6 +240,7 @@ export async function executeVideo(
 
   // Build individual clip segments with proper scaling (preserve aspect ratio + letterbox)
   const segmentPaths: string[] = [];
+  const segmentDurations: number[] = []; // actual durations after ffmpeg generation
 
   for (let i = 0; i < script.clips.length; i++) {
     const clip = script.clips[i];
@@ -244,6 +263,16 @@ export async function executeVideo(
       duration = alignedDuration;
     }
 
+    // For source videos, clamp duration to actual source length
+    const isVideo = !localPath.match(/\.(jpg|jpeg|png|webp)$/i);
+    if (isVideo) {
+      const sourceDur = await probeDuration(localPath);
+      if (sourceDur > 0 && duration > sourceDur) {
+        console.log(`Clip ${i}: clamping duration ${duration}s -> ${sourceDur}s (source shorter)`);
+        duration = sourceDur;
+      }
+    }
+
     // Build filter_complex for text overlay
     let textFilter = "";
     if (clip.textOverlay?.text) {
@@ -254,7 +283,7 @@ export async function executeVideo(
     }
 
     // For images, loop them; for videos, trim
-    const isImage = localPath.match(/\.(jpg|jpeg|png|webp)$/i);
+    const isImage = !isVideo;
 
     if (isImage) {
       // Image -> video segment with Ken Burns zoom effect (preserve aspect ratio)
@@ -300,8 +329,11 @@ export async function executeVideo(
 
       await runFFmpeg(args);
     }
-  }
 
+    // Probe actual duration of the generated segment
+    const actualDur = await probeDuration(segmentPath);
+    segmentDurations.push(actualDur > 0 ? actualDur : duration);
+  }
   if (segmentPaths.length === 0) {
     throw new Error("No valid segments could be created");
   }
@@ -327,8 +359,8 @@ export async function executeVideo(
     let cumulativeOffset = 0;
 
     for (let i = 1; i < segmentPaths.length; i++) {
-      const prevDur = script.clips[i - 1]?.duration || 5;
-      cumulativeOffset += prevDur - transitionDur;
+      const prevDur = segmentDurations[i - 1] || 5;
+      cumulativeOffset += Math.max(0.1, prevDur - transitionDur);
 
       const outLabel = i === segmentPaths.length - 1 ? "outv" : `tmp${i}`;
       filters.push(
