@@ -338,49 +338,26 @@ export async function executeVideo(
     throw new Error("No valid segments could be created");
   }
 
-  // Crossfade concatenation using xfade
+  // Concatenate segments using concat demuxer (bulletproof, no xfade fragility)
   const outputPath = path.join(workDir, "video.mp4");
-  const transitionDur = 0.5; // seconds
 
   if (segmentPaths.length === 1) {
     // Single clip — just copy
     await runFFmpeg(["-i", segmentPaths[0], "-c", "copy", "-an", outputPath]);
   } else {
-    // Build xfade filter_complex for crossfade between segments
-    // No trimming — each segment stays full length, xfade handles the overlap
-    const inputs: string[] = [];
-    const filters: string[] = [];
+    // Write concat list file
+    const concatListPath = path.join(workDir, "concat.txt");
+    const concatLines = segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n");
+    await fs.writeFile(concatListPath, concatLines);
 
-    for (let i = 0; i < segmentPaths.length; i++) {
-      inputs.push("-i", segmentPaths[i]);
-    }
-
-    let prevLabel = "0:v";
-    let cumulativeOffset = 0;
-
-    for (let i = 1; i < segmentPaths.length; i++) {
-      const prevDur = segmentDurations[i - 1] || 5;
-      cumulativeOffset += Math.max(0.1, prevDur - transitionDur);
-
-      const outLabel = i === segmentPaths.length - 1 ? "outv" : `tmp${i}`;
-      filters.push(
-        `[${prevLabel}][${i}:v]xfade=transition=fade:duration=${transitionDur}:offset=${cumulativeOffset}[${outLabel}];`
-      );
-      prevLabel = outLabel;
-    }
-
-    const filterStr = filters.join("");
-    const xfadeArgs = [
-      ...inputs,
-      "-filter_complex", filterStr,
-      "-map", "[outv]",
-      "-c:v", "libx264",
-      "-pix_fmt", "yuv420p",
+    await runFFmpeg([
+      "-f", "concat",
+      "-safe", "0",
+      "-i", concatListPath,
+      "-c", "copy",
       "-an",
       outputPath,
-    ];
-
-    await runFFmpeg(xfadeArgs);
+    ]);
   }
 
   // Add branded outro if specified
@@ -401,11 +378,14 @@ export async function executeVideo(
     await runFFmpeg(outroArgs);
 
     // Concatenate main video + outro with crossfade
+    // Probe actual output duration since concat may differ from script.totalDuration
+    const mainDuration = await probeDuration(outputPath);
+    const fadeOffset = Math.max(0, mainDuration - 0.5);
     const finalOutputPath = path.join(workDir, "video_final.mp4");
     const outroFadeArgs = [
       "-i", outputPath,
       "-i", outroPath,
-      "-filter_complex", `[0:v][1:v]xfade=transition=fade:duration=0.5:offset=${script.totalDuration || 0}[outv]`,
+      "-filter_complex", `[0:v][1:v]xfade=transition=fade:duration=0.5:offset=${fadeOffset}[outv]`,
       "-map", "[outv]",
       "-c:v", "libx264",
       "-pix_fmt", "yuv420p",
