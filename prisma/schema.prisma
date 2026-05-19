@@ -119,3 +119,18 @@ enum RatingType {
   POSITIVE
   NEGATIVE
 }
+
+model AssetQualityFlag {
+  id         String   @id @default(cuid())
+  assetId    String
+  eventId    String
+  flags      String[]
+  brightness Float?
+  fileSize   Int
+  duration   Float?
+  createdAt  DateTime @default(now())
+
+  @@index([eventId])
+  @@index([assetId])
+  @@map("asset_quality_flags")
+}

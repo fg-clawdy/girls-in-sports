@@ -110,6 +110,17 @@ export default function EventPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Quality flags by assetId
+  const [qualityFlags, setQualityFlags] = useState<Record<string, string[]>>({});
+  // Scene segments grouped by parent video assetId
+  const [sceneSegments, setSceneSegments] = useState<
+    Record<string, { id: string; startTime: number; endTime: number; motionScore: number }[]>
+  >({});
+  // Which parent videos have their scene segments expanded
+  const [expandedScenes, setExpandedScenes] = useState<Set<string>>(new Set());
+  // Duplicate-content warning modal
+  const [showDuplicateWarning, setShowDuplicateWarning] = useState(false);
+
   // Lightbox state
   const [lightboxAsset, setLightboxAsset] = useState<ImmichAsset | null>(null);
 
@@ -137,6 +148,24 @@ export default function EventPage() {
           map[f.sourceAssetId] = f.rating;
         });
         setFeedbackMap(map);
+      }
+
+      // Load quality flags (US-004)
+      const qfRes = await fetch(`/api/events/${id}/quality-flags`);
+      if (qfRes.ok) {
+        const qfData = await qfRes.json();
+        const map: Record<string, string[]> = {};
+        qfData.flags.forEach((f: any) => {
+          map[f.assetId] = f.flags;
+        });
+        setQualityFlags(map);
+      }
+
+      // Load scene segments (US-003)
+      const segRes = await fetch(`/api/events/${id}/scene-segments`);
+      if (segRes.ok) {
+        const segData = await segRes.json();
+        setSceneSegments(segData.segments || {});
       }
     } catch {
       setError("Failed to load event data");
@@ -167,7 +196,26 @@ export default function EventPage() {
   };
 
   const selectAll = () => {
-    setSelectedIds(new Set(filteredAssets.map((a) => a.id)));
+    // US-005: Exclude full videos that have detected scenes; include scene segments, images, and videos without scenes
+    const ids: string[] = [];
+    for (const asset of filteredAssets) {
+      if (asset.type !== "VIDEO") {
+        ids.push(asset.id); // Images always included
+      } else {
+        const hasScenes = sceneSegments[asset.id] && sceneSegments[asset.id].length > 0;
+        if (!hasScenes) {
+          ids.push(asset.id); // Videos WITHOUT scenes included
+        }
+        // If video HAS scenes, skip the full video but add its scene segments below
+      }
+    }
+    // Include all scene segment IDs
+    for (const segments of Object.values(sceneSegments)) {
+      for (const seg of segments) {
+        ids.push(seg.id);
+      }
+    }
+    setSelectedIds(new Set(ids));
   };
 
   const deselectAll = () => {
@@ -176,9 +224,30 @@ export default function EventPage() {
 
   const isAllSelected = filteredAssets.length > 0 && filteredAssets.every((a) => selectedIds.has(a.id));
 
-  const enterSelectionMode = () => {
+  const enterSelectionMode = async () => {
     setSelectionMode(true);
     setSelectedIds(new Set());
+    // Load quality flags and scene segments for this event
+    try {
+      const [qfRes, segRes] = await Promise.all([
+        fetch(`/api/events/${id}/quality-flags`),
+        fetch(`/api/events/${id}/scene-segments`),
+      ]);
+      if (qfRes.ok) {
+        const qfData = await qfRes.json();
+        const map: Record<string, string[]> = {};
+        qfData.flags.forEach((f: any) => {
+          map[f.assetId] = f.flags;
+        });
+        setQualityFlags(map);
+      }
+      if (segRes.ok) {
+        const segData = await segRes.json();
+        setSceneSegments(segData.segments || {});
+      }
+    } catch {
+      // Silently fail — flags and scenes are enhancement, not required
+    }
   };
 
   const exitSelectionMode = () => {
@@ -228,8 +297,21 @@ export default function EventPage() {
     e.preventDefault();
   };
 
+  // US-006: Check if any selected full video overlaps with selected scene segments
+  const checkForDuplicateScenes = (): boolean => {
+    for (const parentId of Object.keys(sceneSegments)) {
+      if (!selectedIds.has(parentId)) continue; // Parent not selected
+      const segments = sceneSegments[parentId];
+      for (const seg of segments) {
+        if (selectedIds.has(seg.id)) {
+          return true; // Overlap: both parent and its scene selected
+        }
+      }
+    }
+    return false;
+  };
+
   const handleCompose = async () => {
-    if (selectedIds.size === 0 && !letAiChoose) return;
 
     setRankingLoading(true);
     setShowRankingPanel(true);
@@ -490,7 +572,15 @@ export default function EventPage() {
                   onChange={(e) => {
                     setLetAiChoose(e.target.checked);
                     if (e.target.checked) {
-                      setSelectedIds(new Set(filteredAssets.map((a) => a.id)));
+                      // Use same smart-select logic as selectAll
+                      const ids = filteredAssets
+                        .filter((a) => {
+                          if (a.type !== "VIDEO") return true;
+                          const hasScenes = sceneSegments[a.id] && sceneSegments[a.id].length > 0;
+                          return !hasScenes;
+                        })
+                        .map((a) => a.id);
+                      setSelectedIds(new Set(ids));
                     }
                   }}
                   className="rounded border-zinc-300 text-[var(--accent)] focus:ring-[var(--accent)]"
@@ -498,7 +588,13 @@ export default function EventPage() {
                 Let AI choose the best
               </label>
               <button
-                onClick={handleCompose}
+                onClick={() => {
+                  if (checkForDuplicateScenes()) {
+                    setShowDuplicateWarning(true);
+                  } else {
+                    handleCompose();
+                  }
+                }}
                 disabled={selectedIds.size === 0}
                 className="px-4 py-1.5 bg-[var(--accent)] text-white text-sm font-medium rounded-md hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -545,27 +641,91 @@ export default function EventPage() {
         {album && album.assets.length > 0 ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
             {filteredAssets.map((asset) => (
-              <MediaCard
-                key={asset.id}
-                asset={asset}
-                selectionMode={selectionMode}
-                selected={selectedIds.has(asset.id)}
-                onToggle={() => toggleSelection(asset.id)}
-                onView={() => setLightboxAsset(asset)}
-                onFeedback={(rating) => {
-                  fetch("/api/feedback", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      eventId: id,
-                      sourceAssetId: asset.id,
-                      rating,
-                    }),
-                  });
-                  setFeedbackMap((prev) => ({ ...prev, [asset.id]: rating }));
-                }}
-                feedback={feedbackMap[asset.id] || null}
-              />
+              <div key={asset.id} className="contents">
+                <MediaCard
+                  asset={asset}
+                  selectionMode={selectionMode}
+                  selected={selectedIds.has(asset.id)}
+                  onToggle={() => toggleSelection(asset.id)}
+                  onView={() => setLightboxAsset(asset)}
+                  onFeedback={(rating) => {
+                    fetch("/api/feedback", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        eventId: id,
+                        sourceAssetId: asset.id,
+                        rating,
+                      }),
+                    });
+                    setFeedbackMap((prev) => ({ ...prev, [asset.id]: rating }));
+                  }}
+                  feedback={feedbackMap[asset.id] || null}
+                  qualityFlags={qualityFlags[asset.id] || undefined}
+                />
+                {/* Scene segments for this video */}
+                {asset.type === "VIDEO" && sceneSegments[asset.id] && sceneSegments[asset.id].length > 0 && (
+                  <>
+                    {!expandedScenes.has(asset.id) && selectionMode && (
+                      <div className="col-span-full">
+                        <button
+                          onClick={() => setExpandedScenes((prev) => {
+                            const next = new Set(prev);
+                            next.add(asset.id);
+                            return next;
+                          })}
+                          className="text-xs text-zinc-500 hover:text-zinc-700 flex items-center gap-1 my-1"
+                        >
+                          ▶ Show {sceneSegments[asset.id].length} detected scenes
+                        </button>
+                      </div>
+                    )}
+                    {expandedScenes.has(asset.id) && selectionMode && (
+                      <div className="col-span-full">
+                        <button
+                          onClick={() => setExpandedScenes((prev) => {
+                            const next = new Set(prev);
+                            next.delete(asset.id);
+                            return next;
+                          })}
+                          className="text-xs text-zinc-500 hover:text-zinc-700 flex items-center gap-1 my-1"
+                        >
+                          ▼ Hide {sceneSegments[asset.id].length} scenes
+                        </button>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 mb-2">
+                          {sceneSegments[asset.id].map((seg) => (
+                            <MediaCard
+                              key={seg.id}
+                              asset={{
+                                id: seg.id,
+                                type: "VIDEO",
+                                originalFileName: `${asset.originalFileName} — Scene ${(seg.startTime).toFixed(1)}s-${(seg.endTime).toFixed(1)}s`,
+                                fileCreatedAt: asset.fileCreatedAt,
+                              }}
+                              selectionMode={selectionMode}
+                              selected={selectedIds.has(seg.id)}
+                              onToggle={() => {
+                                setSelectedIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(seg.id)) next.delete(seg.id);
+                                  else next.add(seg.id);
+                                  return next;
+                                });
+                              }}
+                              onView={() => setLightboxAsset({
+                                id: seg.id,
+                                type: "VIDEO",
+                                originalFileName: asset.originalFileName,
+                                fileCreatedAt: asset.fileCreatedAt,
+                              })}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             ))}
           </div>
         ) : album ? (
@@ -1297,7 +1457,37 @@ export default function EventPage() {
   );
 }
 
-function MediaCard({
+{/* Duplicate Warning Modal (US-006) */}
+      {showDuplicateWarning && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowDuplicateWarning(false)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-semibold text-zinc-900 mb-2">Duplicate Content Warning</h3>
+            <p className="text-sm text-zinc-600 mb-6">
+              This full video contains scenes already selected. Using both may create duplicate content.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowDuplicateWarning(false)}
+                className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
+              >
+                Go back and fix
+              </button>
+              <button
+                onClick={() => {
+                  setShowDuplicateWarning(false);
+                  handleCompose();
+                }}
+                className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)]"
+              >
+                Proceed anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      function MediaCard({
   asset,
   selectionMode,
   selected,
@@ -1305,6 +1495,7 @@ function MediaCard({
   onView,
   onFeedback,
   feedback,
+  qualityFlags,
 }: {
   asset: ImmichAsset;
   selectionMode: boolean;
@@ -1313,6 +1504,7 @@ function MediaCard({
   onView: () => void;
   onFeedback?: (rating: "POSITIVE" | "NEGATIVE") => void;
   feedback?: "POSITIVE" | "NEGATIVE" | null;
+  qualityFlags?: string[];
 }) {
   const [loaded, setLoaded] = useState(false);
   const isVideo = asset.type === "VIDEO";
@@ -1424,6 +1616,20 @@ function MediaCard({
             day: "numeric",
           })}
         </p>
+        {/* Quality warning badges (US-004) */}
+        {qualityFlags && qualityFlags.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-1.5">
+            {qualityFlags.map((flag, i) => (
+              <span
+                key={i}
+                className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200"
+                title="This asset may need review"
+              >
+                ⚠ {flag}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

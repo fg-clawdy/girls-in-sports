@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { processVideoForScenes } from "@/lib/scene-detection-service";
+import { analyzeFileQuality } from "@/lib/quality-gate-service";
 
 const IMMICH_URL = process.env.IMMICH_API_URL || "http://localhost:2283";
 const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
@@ -64,6 +65,24 @@ export async function POST(
         const uploadData = await uploadRes.json();
         if (uploadData.id) {
           uploadedAssetIds.push(uploadData.id);
+
+          // Analyze quality in background
+          analyzeFileQuality(file).then(async (quality) => {
+            if (quality.flags.length > 0) {
+              await prisma.assetQualityFlag.create({
+                data: {
+                  assetId: uploadData.id,
+                  eventId: params.id,
+                  flags: quality.flags,
+                  brightness: quality.brightness,
+                  fileSize: quality.fileSize,
+                  duration: quality.duration,
+                },
+              });
+            }
+          }).catch((err) => {
+            console.warn(`Quality analysis failed for ${uploadData.id}:`, err);
+          });
         } else if (uploadData.duplicate) {
           // Already exists — skip, no error
           continue;
