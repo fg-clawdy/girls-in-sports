@@ -102,8 +102,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "Blocked: video-segmentation.ts created but not wired into batch route. Need to replace extractVideoFrames() calls with segmentVideo() pipeline."
+      "passes": true,
+      "notes": "Completed 2026-05-19. Replaced uniform frame extraction with scene-aware pipeline: detectScenes(), per-scene frame sampling, audio-to-scene mapping, multi-segment extraction. Frontend shows segment cards with type badges. Commit: 4accec3."
     },
     {
       "id": "GIS-008",
