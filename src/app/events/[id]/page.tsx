@@ -1443,21 +1443,7 @@ export default function EventPage() {
         </div>
       )}
 
-      {/* Chat toggle button */}
-      {!chatOpen && (
-        <button
-          onClick={() => setChatOpen(true)}
-          className="fixed bottom-6 right-6 w-14 h-14 bg-[var(--accent)] text-white rounded-full shadow-lg hover:bg-[var(--accent-hover)] flex items-center justify-center z-40"
-          title="Composition Assistant"
-        >
-          <span className="text-2xl">🤖</span>
-        </button>
-      )}
-    </div>
-  );
-}
-
-{/* Duplicate Warning Modal (US-006) */}
+      {/* Duplicate Warning Modal (US-006) */}
       {showDuplicateWarning && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/50" onClick={() => setShowDuplicateWarning(false)} />
@@ -1486,6 +1472,20 @@ export default function EventPage() {
           </div>
         </div>
       )}
+
+      {/* Chat toggle button */}
+      {!chatOpen && (
+        <button
+          onClick={() => setChatOpen(true)}
+          className="fixed bottom-6 right-6 w-14 h-14 bg-[var(--accent)] text-white rounded-full shadow-lg hover:bg-[var(--accent-hover)] flex items-center justify-center z-40"
+          title="Composition Assistant"
+        >
+          <span className="text-2xl">🤖</span>
+        </button>
+      )}
+    </div>
+  );
+}
 
       function MediaCard({
   asset,
