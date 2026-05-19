@@ -218,3 +218,21 @@ export async function addAssetsToAlbum(
     throw new Error(`Immich add to album failed: ${res.status}`);
   }
 }
+
+export async function updateAssetDescription(
+  assetId: string,
+  description: string
+): Promise<void> {
+  const res = await fetch(`${IMMICH_URL}/api/assets/${assetId}`, {
+    method: "PUT",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "x-api-key": IMMICH_KEY,
+    },
+    body: JSON.stringify({ description }),
+  });
+  if (!res.ok) {
+    throw new Error(`Immich update description failed: ${res.status} ${await res.text()}`);
+  }
+}

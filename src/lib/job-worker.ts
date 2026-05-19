@@ -13,7 +13,7 @@ const prisma = new PrismaClient({ adapter });
 const POLL_INTERVAL_MS = 2000;
 const MAX_RETRY_DELAY_MS = 60000;
 
-export type JobHandler = (payload: unknown) => Promise<void>;
+export type JobHandler = (args: { payload: unknown; jobId: string }) => Promise<void>;
 
 const handlers = new Map<JobType, JobHandler>();
 
@@ -84,7 +84,7 @@ async function processJob(job: {
     throw new Error(`No handler registered for job type: ${job.type}`);
   }
 
-  await handler(job.payload);
+  await handler({ payload: job.payload, jobId: job.id });
 }
 
 async function markDone(jobId: string, jobType: JobType, payload: unknown) {

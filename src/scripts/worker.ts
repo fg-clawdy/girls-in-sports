@@ -11,10 +11,16 @@ import {
   JobType,
 } from "../lib/job-worker";
 import { handleIngestClip } from "../lib/handlers/ingest-clip";
+import { handleScoreClip } from "../lib/handlers/score-clip";
 
 const HEALTH_PORT = parseInt(process.env.WORKER_HEALTH_PORT || "3011", 10);
 
-registerHandler(JobType.INGEST_CLIP, handleIngestClip as any);
+registerHandler(JobType.INGEST_CLIP, async ({ payload }) => {
+  await handleIngestClip(payload);
+});
+registerHandler(JobType.SCORE_CLIP, async ({ payload, jobId }) => {
+  await handleScoreClip({ payload, jobId });
+});
 
 setupGracefulShutdown();
 startHealthServer(HEALTH_PORT);

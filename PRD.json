@@ -98,8 +98,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": "Stream copy (-c copy) is critical for performance — no re-encode at this stage. Quality is preserved for the final render."
+      "passes": true,
+      "notes": "Implemented 2026-05-19. handleIngestClip in src/lib/handlers/ingest-clip.ts: download, ffprobe, scene detection with 0.30 threshold, stream-copy cut, upload clips to Immich, create CLIP assets, enqueue SCORE_CLIP jobs. Temp cleanup in finally block. Commit: 4f9ed99."
     },
     {
       "id": "US-006",
