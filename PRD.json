@@ -139,8 +139,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-19. /events/[id]/curate page with scored clip grid, composite score badges, clipType labels, tag chip filters (AND logic), local search, Accept/Reject toggle, Must-Include star, creative brief (500 chars), target format selector, energy preset. /api/events/[id]/clips GET returns SCORED CLIPs with ClipScore + AssetTags. /api/events/[id]/campaigns POST creates Campaign + CampaignClips, enqueues DIRECT_SCRIPT job. Schema additions: EnergyPreset enum, Campaign.energyPreset, Campaign.selectedAssetIds, CampaignClip.accepted/mustInclude."
     },
     {
       "id": "US-008",
