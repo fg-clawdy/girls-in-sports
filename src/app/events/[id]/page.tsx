@@ -108,7 +108,8 @@ export default function EventPage() {
 
   // Upload state
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
+  const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Quality flags by assetId
@@ -121,6 +122,14 @@ export default function EventPage() {
   const [expandedScenes, setExpandedScenes] = useState<Set<string>>(new Set());
   // Duplicate-content warning modal
   const [showDuplicateWarning, setShowDuplicateWarning] = useState(false);
+  // Upload toast notification
+  const [showUploadToast, setShowUploadToast] = useState(false);
+
+  useEffect(() => {
+    if (!showUploadToast) return;
+    const timer = setTimeout(() => setShowUploadToast(false), 6000);
+    return () => clearTimeout(timer);
+  }, [showUploadToast]);
 
   // Lightbox state
   const [lightboxAsset, setLightboxAsset] = useState<ImmichAsset | null>(null);
@@ -262,30 +271,50 @@ export default function EventPage() {
   const handleUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setUploading(true);
-    setUploadProgress(0);
+    setUploadErrors([]);
+    setUploadProgress({});
+    const fileList = Array.from(files);
     try {
-      const formData = new FormData();
-      for (let i = 0; i < files.length; i++) {
-        formData.append("files", files[i]);
-      }
-      const res = await fetch(`/api/events/${id}/upload`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || "Upload failed");
-      } else if (data.errors && data.errors.length > 0) {
-        alert(`Upload completed with ${data.errors.length} error(s):\n${data.errors.join("\n")}`);
-      } else {
-        alert(`Upload successful! ${data.uploaded} file(s) added.`);
-        await fetchEventData();
-      }
-    } catch {
-      alert("Upload error");
+      await Promise.all(
+        fileList.map(
+          (file) =>
+            new Promise<void>((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              const formData = new FormData();
+              formData.append("files", file);
+              xhr.upload.addEventListener("progress", (e) => {
+                if (e.lengthComputable) {
+                  const pct = Math.round((e.loaded / e.total) * 100);
+                  setUploadProgress((prev) => ({ ...prev, [file.name]: pct }));
+                }
+              });
+              xhr.addEventListener("load", () => {
+                setUploadProgress((prev) => ({ ...prev, [file.name]: 100 }));
+                if (xhr.status >= 200 && xhr.status < 300) {
+                  resolve();
+                } else {
+                  reject(new Error(`${file.name}: ${xhr.statusText || "Upload failed"}`));
+                }
+              });
+              xhr.addEventListener("error", () => {
+                reject(new Error(`${file.name}: Network error`));
+              });
+              xhr.addEventListener("abort", () => {
+                reject(new Error(`${file.name}: Aborted`));
+              });
+              xhr.open("POST", `/api/events/${id}/upload`);
+              xhr.send(formData);
+            })
+        )
+      );
+      setShowUploadToast(true);
+      await fetchEventData();
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Upload error";
+      setUploadErrors((prev) => [...prev, msg]);
     } finally {
       setUploading(false);
-      setUploadProgress(0);
     }
   };
 
@@ -551,6 +580,45 @@ export default function EventPage() {
             )}
           </div>
         </div>
+
+        {/* Upload progress & errors (US-004) */}
+        {uploading && Object.keys(uploadProgress).length > 0 && (
+          <div className="mb-4 space-y-2">
+            {Object.entries(uploadProgress).map(([name, pct]) => (
+              <div key={name} className="flex items-center gap-3">
+                <span className="text-xs text-zinc-600 w-32 truncate flex-shrink-0" title={name}>
+                  {name}
+                </span>
+                <div className="flex-1 h-2 bg-zinc-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-[var(--accent)] rounded-full transition-all duration-300"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="text-xs text-zinc-500 w-8 text-right">{pct}%</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {uploadErrors.length > 0 && (
+          <div className="mb-4 space-y-2">
+            {uploadErrors.map((err, i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-2.5"
+              >
+                <p className="text-sm text-red-700">{err}</p>
+                <button
+                  onClick={() => setUploadErrors((prev) => prev.filter((_, idx) => idx !== i))}
+                  className="text-red-500 hover:text-red-700 text-sm ml-3"
+                  title="Dismiss"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Selection controls bar */}
         {selectionMode && (
@@ -1485,6 +1553,27 @@ export default function EventPage() {
                 Proceed anyway
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upload completion toast (US-004) */}
+      {showUploadToast && (
+        <div className="fixed top-4 right-4 z-50 bg-green-50 border border-green-200 rounded-lg px-4 py-3 shadow-lg max-w-sm animate-in slide-in-from-top-2">
+          <div className="flex items-start gap-2">
+            <span className="text-green-600 text-lg">✓</span>
+            <div>
+              <p className="text-sm font-medium text-green-800">Upload complete</p>
+              <p className="text-xs text-green-700 mt-0.5">
+                Your footage is being processed. We&apos;ll notify you when it&apos;s ready.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowUploadToast(false)}
+              className="text-green-600 hover:text-green-800 text-sm ml-2"
+            >
+              ×
+            </button>
           </div>
         </div>
       )}

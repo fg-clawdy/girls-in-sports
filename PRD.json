@@ -1,153 +1,325 @@
 {
-  "title": "Girls In Sports — AI Video Composition & Media Ranking",
-  "description": "AI-powered video segmentation, audio analysis, and smart composition for youth sports marketing content.",
-  "stories": [
+  "project": "Girls In Sports – Agentic Production Overhaul",
+  "branchName": "dev/agentic-production-overhaul",
+  "description": "Full architectural overhaul of GIS: async job queue, 5-stage PWA production pipeline, AI director with structured outputs, Venice full-stack integration (STT, vision, music, upscale), Immich tag intelligence layer, proxy-then-final render strategy, and PWA push notifications.",
+  "stages": {
+    "overview": "5-stage pipeline: INGEST → CURATE → DIRECT → ROUGH_DRAFT → FINAL_RENDER. User receives PWA push notification at the end of each background stage and returns to app to review and advance.",
+    "INGEST":       "Stage 1 – Background. Scene-cut long videos into clips, run Venice STT + vision scoring per clip, write GIS tags to Immich sidecar, store scores in DB.",
+    "CURATE":       "Stage 2 – User interaction. Review scored clips, filter by tag/search, accept/reject, type creative brief, select target format. Fires Stage 3.",
+    "DIRECT":       "Stage 3 – Background. Reasoning LLM generates ProductionScript JSON + fires Venice music generation. Fires Stage 4.",
+    "ROUGH_DRAFT":  "Stage 4 – User interaction. Preview 720p proxy render. Rate, provide clip-level feedback, approve music, approve for final. Fires Stage 5.",
+    "FINAL_RENDER": "Stage 5 – Background. Full 1080×1920 H.264 2-pass render, optional Topaz upscale for sub-720p sources, audio mix, text overlays. Upload to Immich Campaigns album."
+  },
+  "userStories": [
     {
-      "id": "GIS-001",
-      "title": "Intent-driven video composition with user editing",
-      "description": "User describes intent, AI generates production script, user edits before execution. Hidden prompts in prompt-engineer.ts.",
+      "id": "US-001",
+      "title": "Persistent async job queue with worker process",
+      "description": "As a system architect, I want a persistent job queue backed by the Prisma DB so that all background work (ingest, scoring, render) runs in a dedicated worker process that survives Next.js restarts, supports retry logic, and is never blocked by HTTP timeouts.",
       "acceptanceCriteria": [
-        "User intent textarea opens before composition type selection",
-        "AI generates script based on user intent + selected assets",
-        "User can edit the generated script before executing",
+        "A `Job` table exists in the Prisma schema with fields: id, type (enum: INGEST_CLIP | SCORE_CLIP | DIRECT_SCRIPT | RENDER_PROXY | RENDER_FINAL | GENERATE_MUSIC), status (enum: QUEUED | RUNNING | DONE | FAILED | RETRYING), payload (JSON), attempts (int default 0), maxAttempts (int default 3), error (string nullable), createdAt, startedAt, completedAt, parentJobId (self-relation nullable)",
+        "A standalone worker process (`worker.ts`) runs via PM2 or node directly, polls the `Job` table every 2s for QUEUED jobs, claims them atomically via a single `UPDATE … WHERE status='QUEUED' LIMIT 1 RETURNING *` to prevent double-processing",
+        "Failed jobs increment `attempts`; if `attempts < maxAttempts` the job is reset to QUEUED with exponential backoff delay written to a `retryAfter` field; if `attempts >= maxAttempts` status becomes FAILED and error is persisted",
+        "No job processing occurs inside Next.js API route handlers — routes only INSERT into the Job table and return 202 Accepted",
+        "The worker exposes a `/health` endpoint on a separate port (default 3011) returning `{ status: 'ok', queueDepth: N, runningJobs: N }`",
         "Typecheck passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Completed 2026-05-18. Implemented prompt-engineer.ts, updated composer.ts, event page UI, composition API. Commit: f185410."
+      "notes": "Implemented 2026-05-19. Job table with JobType/JobStatus enums, atomic claim via FOR UPDATE SKIP LOCKED, exponential backoff retry, health endpoint on port 3011, standalone worker.ts entry point. Commit: b468d4c."
     },
     {
-      "id": "GIS-002",
-      "title": "Vision AI error handling with configuration states",
-      "description": "Distinguish 'not configured' vs 'configured but failed' vs 'spend limit' in vision API errors.",
+      "id": "US-002",
+      "title": "PWA manifest, service worker, and push notification infrastructure",
+      "description": "As a user, I want the GIS app to be installable as a PWA and receive push notifications when background jobs complete so that I can leave the app and be brought back to exactly the right stage when my work is ready.",
       "acceptanceCriteria": [
-        "Error response includes visionConfigured boolean",
-        "UI shows distinct banners for each error type",
-        "402 spend limit detected and surfaced",
-        "Typecheck passes"
+        "A `manifest.json` exists at the Next.js public root with `name`, `short_name`, `display: standalone`, `start_url`, `background_color`, `theme_color`, and at minimum 192×192 and 512×512 `icons`",
+        "A service worker (`sw.js`) is registered in `_app.tsx` or `layout.tsx` on first load and handles the `push` event to display a notification with `title`, `body`, and `data.url` (the stage URL the user should return to)",
+        "A `PushSubscription` table exists in Prisma with fields: id, endpoint, p256dh, auth, userId (relation), createdAt",
+        "An API route `POST /api/push/subscribe` accepts a Web Push subscription object and upserts it to the `PushSubscription` table",
+        "A `sendPushNotification(userId, title, body, targetUrl)` utility function exists in `src/lib/push.ts` that uses the `web-push` npm package to send to all active subscriptions for a user",
+        "The worker calls `sendPushNotification` after marking a job DONE for stage-completing job types: SCORE_CLIP (all clips done), DIRECT_SCRIPT, RENDER_PROXY, RENDER_FINAL",
+        "Notification payload's `data.url` resolves to the correct stage URL: `/events/[id]/curate` for post-ingest, `/campaigns/[id]/preview` for post-draft, `/campaigns/[id]/download` for post-final",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Completed 2026-05-18. Updated vision rank route and event page. Commit: 641eeb9."
+      "notes": "Implemented 2026-05-19. manifest.json, sw.js, PushSubscription model, /api/push/subscribe, sendPushNotification in lib/push.ts, integrated into worker markDone. Commit: bc2d4ca."
     },
     {
-      "id": "GIS-003",
-      "title": "Batch ranking for all media with progress UI",
-      "description": "Analyze all assets (not just 3) with real-time progress updates. Support videos via frame extraction.",
+      "id": "US-003",
+      "title": "Prisma schema overhaul – Asset intelligence layer",
+      "description": "As a developer, I want a clean, comprehensive DB schema that models the full 5-stage pipeline so that every piece of application state has a canonical home and no business logic leaks into ad-hoc JSON blobs.",
       "acceptanceCriteria": [
-        "Batch endpoint processes all assets in batches of 3",
-        "Progress bar shows completed/failed/total batches",
-        "Videos analyzed via frame extraction",
+        "Schema includes `Event` (id, name, sport, userId, status: enum UPLOADING|INGESTING|READY|ARCHIVED, createdAt)",
+        "Schema includes `Asset` (id, eventId, immichAssetId, type: enum SOURCE_VIDEO|SOURCE_IMAGE|CLIP|PROXY|FINAL, parentAssetId self-relation, filePath, durationSeconds, widthPx, heightPx, fps, codec, sizeBytes, status: enum UPLOADED|INGESTING|SCORED|FAILED, ingestJobId, createdAt)",
+        "Schema includes `ClipScore` (id, assetId unique, visionScore, audioScore, motionScore, compositeScore, clipType: enum ACTION|SPEECH|MIXED|MONTAGE, hasFaces, hasCoachSpeech, hasActionKeyword, transcriptExcerpt, keywordHits JSON, scoredAt)",
+        "Schema includes `AssetTag` (id, assetId, tag, source: enum GIS_AI|USER_MANUAL|IMMICH_CLIP, confidence float nullable, createdAt) with unique constraint on (assetId, tag)",
+        "Schema includes `Campaign` (id, eventId, userId, name, targetFormat: enum REEL_15|REEL_30|REEL_60|AD_15|AD_30|HIGHLIGHT_60, brief, status: enum DIRECTING|SCRIPTED|PROXY_READY|APPROVED|RENDERING|DONE|FAILED, scriptJson JSON nullable, musicUrl nullable, musicPrompt nullable, proxyAssetId relation nullable, finalAssetId relation nullable, userFeedbackJson JSON nullable, createdAt)",
+        "Schema includes `CampaignClip` (id, campaignId, assetId, order, startTimeMs, endTimeMs, narrativeLabel, durationMultiplier)",
+        "All prior `GeneratedAsset`, `SceneSegment`, `EventThumbnail` models are migrated into or superseded by the new schema",
+        "Running `prisma migrate dev` produces zero errors and zero data loss on an existing dev DB",
         "Typecheck passes"
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Completed 2026-05-18. Created batch ranking route, updated event page with progress UI. Commit: 36b983c."
+      "notes": "Implemented 2026-05-19. Full schema overhaul with EventStatus, Asset/AssetType/AssetStatus, ClipScore/ClipType, AssetTag/AssetTagSource, Campaign/TargetFormat/CampaignStatus, CampaignClip. Legacy models preserved for zero data loss. Commit: fdc9e7c."
     },
     {
-      "id": "GIS-004",
-      "title": "Variable-density frame extraction for video ranking",
-      "description": "Core zones get 2x more frames than edge zones. Edge frames weighted 0.7x, core frames 1.0x.",
+      "id": "US-004",
+      "title": "Stage 0 – Upload handler with immediate job dispatch",
+      "description": "As a user, I want to upload one or more video files (or a folder) and immediately receive confirmation that they were received, with a notification promise, so that I don't have to wait or watch a progress spinner for AI processing.",
       "acceptanceCriteria": [
-        "Edge zones (first/last 20%) sample at 1 frame / 2.0s",
-        "Core zone (middle 60%) samples at 1 frame / 1.0s",
-        "Temporal weighting applied in score calculation",
-        "Typecheck passes"
+        "`POST /api/events/[id]/upload` streams each file to Immich using the Immich `/assets` upload endpoint with `x-api-key` header authentication (no query param), creates an `Asset` record in UPLOADED status, and inserts a INGEST_CLIP job into the Job table",
+        "The API route returns 202 within 5 seconds regardless of file size (streaming, not buffering the full file in memory)",
+        "The upload UI shows a per-file progress bar (using `XMLHttpRequest` `progress` events or `fetch` with a `ReadableStream`), not an indeterminate spinner",
+        "On the final file's 202 response, the UI displays a toast: 'Upload complete – your footage is being processed. We'll notify you when it's ready.' with no further blocking UI",
+        "If the Immich upload returns a non-2xx response, the Asset record is set to FAILED status and the error message is surfaced in the UI as a dismissible alert",
+        "Multiple concurrent uploads to the same event are supported without race conditions on the Event status field",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Completed 2026-05-18. Rewrote batch route variable-density logic. Commit: 69dbbfd."
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "GIS-005",
-      "title": "Venice AI STT integration for audio-weighted scoring",
-      "description": "Extract audio from videos, transcribe via Venice AI Whisper, score based on keywords + speech density.",
+      "id": "US-005",
+      "title": "Stage 1a – Scene detection and clip segmentation worker job",
+      "description": "As the system, I want every uploaded video longer than 60 seconds to be automatically split into scene-boundary clips so that downstream AI scoring works on coherent, meaningful units rather than arbitrary time windows.",
       "acceptanceCriteria": [
-        "Audio extracted via ffmpeg to 16kHz mono WAV",
-        "STT via Venice API with openai/whisper-large-v3",
-        "Keyword detection with sports-specific vocabulary",
-        "Audio score blended into final score (30% weight)",
+        "The INGEST_CLIP job handler reads the source Asset, downloads the file from Immich to a local temp directory (`/tmp/gis/[assetId]/`), and runs `ffprobe` to populate Asset fields: durationSeconds, widthPx, heightPx, fps, codec, sizeBytes",
+        "If durationSeconds > 60, `ffmpeg` scene detection runs with `-vf select='gt(scene,0.30)'` and produces a list of scene boundary timestamps with minimum scene duration of 3s and maximum of 120s",
+        "Each detected scene is cut with `ffmpeg -ss [start] -to [end] -c copy` (stream copy, lossless, no re-encode) and uploaded to Immich as a new asset with the original as `parentAssetId`",
+        "Each clip Asset record is created with status UPLOADED and a new SCORE_CLIP job is inserted for it",
+        "If durationSeconds <= 60, no splitting occurs and a single SCORE_CLIP job is inserted for the source asset directly",
+        "Temp files are deleted from `/tmp/gis/` after successful Immich upload or after 3 failed upload attempts",
+        "Parent Asset status is updated to INGESTING during processing and SCORED when all child SCORE_CLIP jobs complete (tracked via parentJobId chain)",
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Completed 2026-05-18. Created audio-analysis.ts, integrated into batch route, updated UI badges. Commit: a847f97."
+      "passes": false,
+      "notes": "Stream copy (-c copy) is critical for performance — no re-encode at this stage. Quality is preserved for the final render."
     },
     {
-      "id": "GIS-006",
-      "title": "Video segmentation engine — scene detection + multi-segment extraction",
-      "description": "ffmpeg scene detection, dense per-scene frame sampling, audio-to-scene mapping, multi-segment extraction with variable durations.",
+      "id": "US-006",
+      "title": "Stage 1b – Per-clip AI scoring (Venice vision + STT + motion)",
+      "description": "As the system, I want every clip to receive a composite quality score from vision analysis, speech transcription, and motion detection so that the AI Director in Stage 3 has rich, graded intelligence about every piece of footage.",
       "acceptanceCriteria": [
-        "ffmpeg scene detection produces natural cut points",
-        "Frames sampled densely within each scene",
-        "Audio segments mapped to scenes by timestamp overlap",
-        "Multiple ProductionSegments extracted per video",
-        "Variable durations: action 1.5-6s, speech 5-25s",
-        "Combined scoring: vision 50%, audio 30%, motion 20%",
+        "The SCORE_CLIP job handler downloads the clip from Immich and runs Venice `/video/transcriptions` on the raw video file (not extracted audio), storing the full word-level transcript and computing a keyword score against a configurable sport-specific keyword list (e.g. 'great', 'hustle', 'defense', 'let's go', 'nice shot', coach directive patterns)",
+        "ffmpeg extracts keyframes within detected scene boundaries: ≤10s scene → 3 frames, 10–30s → 6 frames, >30s → 12 frames, sampled at proportional intervals within the scene bounds",
+        "Keyframes are sent to Venice vision model (`glm-4.5v` or best available vision model) in batches of 3 with a structured JSON response format specifying: energyScore (0-100), faceCount (int), actionClarity (0-100), subjectCentering (0-100), brandVisibility (bool), overallScore (0-100)",
+        "Motion intensity is computed locally using ffmpeg `mestimate` filter with EPZS algorithm, producing a normalized 0–100 score without any Venice API call",
+        "Composite score formula: `composite = (visionScore * 0.50) + (audioScore * 0.30) + (motionScore * 0.20)` where visionScore is the mean of all keyframe overallScores",
+        "clipType is assigned by rule: motionScore > 60 AND audioScore < 40 → ACTION; audioScore > 60 AND motionScore < 40 → SPEECH; motionScore > 60 AND audioScore > 40 → MIXED; else → MONTAGE",
+        "A `ClipScore` record is created and the Asset status set to SCORED",
+        "GIS writes tags back to Immich via `PUT /api/assets/[immichAssetId]` with description containing structured tags: `gis:score=[composite]`, `gis:type=[clipType]`, `gis:sport=[eventSport]`, `gis:hasFaces=[bool]`, `gis:hasCoachSpeech=[bool]` — also written to `AssetTag` table with source=GIS_AI",
+        "The highest-composite-score clip's best keyframe is set as the Event thumbnail via `PUT /api/assets/[immichAssetId]` thumbhash or by updating Event.thumbnailAssetId",
+        "When all SCORE_CLIP jobs for an Event complete, a PWA push notification is sent: 'Your [Event name] footage is ready – [N] clips scored and tagged.'",
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Completed 2026-05-19. Created video-segmentation.ts with full pipeline. Commit: 1546173."
+      "passes": false,
+      "notes": "Venice STT on video directly (not extracted audio) simplifies the pipeline and gives word-level timestamps tied to video frames. The keyword list should be stored in a configurable JSON config file per sport type."
     },
     {
-      "id": "GIS-007",
-      "title": "Wire segmentation engine into batch ranking API",
-      "description": "Replace current frame extraction in batch route with full scene-aware segmentation pipeline. Store per-asset frame scores for composition reuse.",
+      "id": "US-007",
+      "title": "Stage 2 – Clip curation UI with tag filtering and creative brief",
+      "description": "As a content creator, I want a visual clip browser where I can review AI-scored footage, filter by sport content tags, accept or reject individual clips, and write a creative brief before launching the AI director so that the final video reflects my vision, not just the algorithm's.",
       "acceptanceCriteria": [
-        "Batch route calls segmentVideo() instead of uniform frame extraction",
-        "Frame scores stored in response for composition reuse",
-        "Audio analysis runs in parallel with frame extraction",
-        "Backward compatibility maintained for image assets",
-        "Typecheck passes"
+        "Route `/events/[id]/curate` renders a grid of all SCORED clips for the event, sorted by compositeScore descending by default",
+        "Each clip card displays: thumbnail (from Immich), compositeScore as a colored badge (green ≥70, yellow 40–69, red <40), clipType label, duration, and all GIS-applied tags",
+        "A tag filter panel shows all unique tags across the event's clips as clickable chips; selecting multiple tags narrows the grid to clips matching ALL selected tags (AND logic)",
+        "A text search input triggers Immich smart search (CLIP semantic search via `POST /api/search/smart`) and highlights matching clips in the grid",
+        "Each clip card has Accept (default) / Reject toggle — rejected clips are excluded from Stage 3; a 'Select All' button defaults to accepting all clips with score ≥ 50",
+        "A 'Must Include' star on any clip forces it into the final script regardless of LLM ranking decisions",
+        "The creative brief section contains: a free-text input (max 500 chars) with placeholder examples by sport, a target format selector (15s Reel | 30s Reel | 60s Highlight | 15s Ad | 30s Ad), and an energy preset (Hype | Inspirational | Emotional | Instructional)",
+        "A 'Create Campaign' button is disabled until at least 3 clips are accepted and a format is selected; clicking it inserts a DIRECT_SCRIPT job and navigates to a waiting/status screen",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "Completed 2026-05-19. Replaced uniform frame extraction with scene-aware pipeline: detectScenes(), per-scene frame sampling, audio-to-scene mapping, multi-segment extraction. Frontend shows segment cards with type badges. Commit: 4accec3."
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "GIS-008",
-      "title": "Update composition API for smart trimming",
-      "description": "Composition script includes startTime/endTime per clip. ffmpeg commands use -ss and -t for precise extraction.",
+      "id": "US-008",
+      "title": "Stage 3a – AI Director: reasoning LLM produces ProductionScript JSON",
+      "description": "As the system, I want a reasoning LLM to act as a film director and produce a complete, structured production script from the curated clip manifest so that the composition reflects genuine editorial intelligence — pacing, narrative arc, clip selection — not just sorted scores.",
       "acceptanceCriteria": [
-        "Composition script schema includes trimStart and trimDuration per clip",
-        "ffmpeg composition respects trim windows",
-        "Fallback to full clip if trim data unavailable",
+        "The DIRECT_SCRIPT job handler assembles a director prompt containing: event sport/context, target format duration and platform, user creative brief and energy preset, full clip manifest (clipId, compositeScore, clipType, durationSeconds, transcriptExcerpt max 200 chars, tags) for all accepted clips, must-include clip IDs, and a strict output JSON schema",
+        "The Venice chat completions call uses a reasoning-capable model (preferred: `qwen-qwq-32b` or `deepseek-r1-671b`) with `reasoning_effort: 'high'`, `venice_parameters.include_venice_system_prompt: false`, `venice_parameters.strip_thinking_response: true`, and `response_format: { type: 'json_schema', json_schema: { ... } }`",
+        "The enforced output JSON schema is: `{ narrativeArc: string, pacingStyle: enum, musicMood: string, musicBPMRange: [number, number], clips: [{ assetId, startTimeMs, endTimeMs, durationMs, narrativeLabel, textOverlay: string|null, order }], totalDurationMs: number }`",
+        "All must-include clips appear in the output `clips` array; their startTimeMs/endTimeMs must fall within the source clip's actual duration (validated server-side against the Asset record)",
+        "Total duration of all clips (sum of durationMs) is within ±10% of the target format's target duration",
+        "If the LLM response fails JSON schema validation, the job retries up to 2 additional times with a corrective prompt appended before failing",
+        "On success, Campaign.scriptJson is populated, status set to SCRIPTED, and a GENERATE_MUSIC job and RENDER_PROXY job are both inserted (parallel execution)",
         "Typecheck passes"
       ],
       "priority": 8,
       "passes": false,
-      "notes": "Depends on GIS-007. Need ProductionSegment data threaded from ranking to composition."
+      "notes": "The reasoning model's thinking tokens are stripped from the response (`strip_thinking_response: true`) — we only want the clean JSON output. Prompt caching should be applied to the static system portion for repeated calls."
     },
     {
-      "id": "GIS-009",
-      "title": "UI for multi-segment video display",
-      "description": "Ranking panel shows multiple candidate segments per video with type badges, timestamps, and score breakdowns.",
+      "id": "US-009",
+      "title": "Stage 3b – Venice music generation for campaign",
+      "description": "As the system, I want background music automatically generated to match the campaign's sport, energy, and duration so that every finished video has a professionally fitted soundtrack without any manual selection.",
       "acceptanceCriteria": [
-        "Video cards show multiple segment candidates",
-        "Each segment displays type badge (action/speech/mixed/montage)",
-        "Timestamps shown as MM:SS ranges",
-        "Score breakdown visible (vision/audio/motion)",
+        "The GENERATE_MUSIC job handler constructs a Venice music generation prompt from: Campaign.musicMood, Campaign.targetFormat duration, event sport type, energy preset, and musicBPMRange from the ProductionScript",
+        "The music API call uses `ElevenLabs Music` model (or `ACE-Step 1.5` as fallback) via `/api/v1/audio/queue` with `force_instrumental: true` and duration set to Campaign target duration + 3s (tail fade buffer)",
+        "The job polls `/api/v1/audio/retrieve` every 5s until status is `completed` (max 10 minutes before marking job FAILED)",
+        "On completion, the generated audio file is downloaded to local temp storage and the file path stored in Campaign.musicUrl",
+        "If GENERATE_MUSIC fails, the Campaign is not blocked — RENDER_PROXY proceeds without music and the UI shows a 'Music generation failed – render will continue without music' warning",
         "Typecheck passes"
       ],
       "priority": 9,
       "passes": false,
-      "notes": "Depends on GIS-007. Need batch route to return segment data first."
+      "notes": ""
     },
     {
-      "id": "GIS-010",
-      "title": "Database schema for segment metadata persistence",
-      "description": "Store per-asset frame scores and segment metadata so composition can reuse ranking data without re-analyzing.",
+      "id": "US-010",
+      "title": "Stage 3c – Proxy render worker (720p fast draft)",
+      "description": "As the system, I want a fast 720p proxy render assembled from the ProductionScript so that the user can review an accurate preview of the final composition within minutes, not the full render time.",
       "acceptanceCriteria": [
-        "New table: VideoSegment with assetId, startTime, endTime, score, type",
-        "New table: FrameScore with assetId, timestamp, score, sceneIndex",
-        "Ranking API persists segments after analysis",
-        "Composition API queries persisted segments",
+        "The RENDER_PROXY job handler reads Campaign.scriptJson and for each CampaignClip: downloads the source clip from Immich to temp, cuts the segment using `ffmpeg -ss [startTimeMs/1000] -to [endTimeMs/1000] -c copy` (stream copy at source quality), validates that requested timestamps are within actual file duration (clamping with 200ms safety margin)",
+        "All cut segments are assembled using the ffmpeg concat demuxer (`-f concat -safe 0`) — no xfade transitions at proxy stage",
+        "Output is scaled to 720p (1280×720 for landscape, 720×1280 for portrait 9:16) with `ffmpeg -vf scale=720:-2` and encoded with `-c:v libx264 -crf 28 -preset veryfast -c:a aac -b:a 128k`",
+        "If Campaign.musicUrl exists, the music file is mixed with the concat output using `ffmpeg -i video.mp4 -i music.mp3 -filter_complex '[0:a]volume=1.0[va];[1:a]volume=0.3[ma];[va][ma]amix=inputs=2:duration=first' -c:v copy`",
+        "A visible semi-transparent watermark 'DRAFT – GIS' is composited on the output using `ffmpeg -vf drawtext`",
+        "On completion, the proxy MP4 is uploaded to Immich as a new Asset with type=PROXY, linked to Campaign.proxyAssetId, and Campaign.status set to PROXY_READY",
+        "A PWA push notification is sent: 'Your rough draft for [Campaign name] is ready to preview.'",
+        "Render wall clock time must be under 3 minutes for a 60s proxy on the local server (tested with a representative 10-clip composition)",
         "Typecheck passes"
       ],
       "priority": 10,
       "passes": false,
-      "notes": "Optional optimization. Can start with in-memory passing from ranking to composition via API response."
+      "notes": "Stream copy at the cut stage means no quality loss and near-instant segment extraction. The CRF 28 + veryfast encode is only for the proxy output — the final render uses CRF 18 + slow."
+    },
+    {
+      "id": "US-011",
+      "title": "Stage 4 – Rough draft preview and user feedback UI",
+      "description": "As a content creator, I want to watch my rough draft in the app, provide clip-level and overall feedback, approve or request changes to the music, and gate the final render with an explicit approval so that I never burn full render time on something I'd reject.",
+      "acceptanceCriteria": [
+        "Route `/campaigns/[id]/preview` streams the proxy video from the local output path (or Immich) via a `<video>` element with native controls and autoplay disabled",
+        "A timeline scrubber below the player shows clip boundaries from CampaignClips, with each clip labeled by its narrativeLabel; clicking a clip boundary seeks the video to that timestamp",
+        "An overall rating control offers two options: 'Ready to post' and 'Needs adjustment' with a required selection before the Approve button is enabled",
+        "Per-clip feedback: hovering or tapping a clip boundary label reveals a popover with a 1-click sentiment (👍 / 👎 / ✂️ Too long / ⚡ Too short) stored to Campaign.userFeedbackJson",
+        "A music preview section shows the generated music track in an `<audio>` element; user can approve it or click 'Regenerate music' which inserts a new GENERATE_MUSIC job and re-renders the proxy once complete",
+        "The 'Approve for Final Render' button is enabled only when overall rating is set; clicking it sets Campaign.status to APPROVED, inserts a RENDER_FINAL job, and navigates to a waiting screen with estimated time displayed",
+        "A 'Start Over' button resets the Campaign to SCRIPTED status and returns to the curate screen with all user selections preserved",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Stage 5 – Final production render with optional Topaz upscale",
+      "description": "As the system, I want to produce a broadcast-quality 1080×1920 vertical H.264 video with proper audio mix, text overlays, and AI upscaling for low-resolution source clips so that the output is ready to post on Instagram Reels, TikTok, and YouTube Shorts without any further processing.",
+      "acceptanceCriteria": [
+        "The RENDER_FINAL job handler checks each source clip's widthPx: if widthPx < 720, a Venice Topaz upscale job is queued for that clip with `upscale_factor: 2` before proceeding; the job polls until complete and uses the upscaled URL as the source for that clip's cut",
+        "Each clip is cut at the exact CampaignClip startTimeMs/endTimeMs with 150ms safety padding using `ffmpeg -ss -to -c copy`",
+        "All segments are assembled with ffmpeg concat demuxer, then a single-pass `-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2` filter handles aspect ratio without stretching (pillarbox/letterbox, never distort)",
+        "Final video encode: `ffmpeg -c:v libx264 -crf 18 -preset slow -profile:v high -level 4.0 -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +faststart`",
+        "If Campaign.musicUrl exists, music is mixed with ducked original audio: original at –12dB, music at 0dB, final mix normalized to –14 LUFS using `ffmpeg -af loudnorm`",
+        "Text overlays from CampaignClip.textOverlay fields are composited using `ffmpeg -vf drawtext` with font size proportional to 1080p frame, bottom-third safe area positioning",
+        "Final MP4 is written to `/outputs/[campaignId]/final.mp4`, uploaded to Immich in a 'GIS Campaigns' album as a new Asset with type=FINAL, and Campaign.finalAssetId populated",
+        "Campaign.status is set to DONE and a PWA push notification is sent: 'Your campaign video for [Event name] is ready to download.'",
+        "The final file must be a valid MP4 playable in VLC and Chrome without additional codecs (verified by `ffprobe -v error -select_streams v:0 -show_entries stream=codec_name` returning `h264`)",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "The Topaz upscale runs only on source clips that are sub-720p. For typical modern phone footage (1080p+), this step is skipped entirely, keeping cost and time low."
+    },
+    {
+      "id": "US-013",
+      "title": "Final delivery page with download, share, and feedback capture",
+      "description": "As a content creator, I want a clean delivery page after the final render completes so that I can download the finished video, copy a shareable link, and rate the overall result — feeding data back into the system's learning loop.",
+      "acceptanceCriteria": [
+        "Route `/campaigns/[id]/download` renders when Campaign.status is DONE and displays the final video via a `<video>` element with full controls, no watermark",
+        "A prominent 'Download MP4' button triggers a direct file download from the local outputs path served via a Next.js route `/api/campaigns/[id]/download` which streams the file with `Content-Disposition: attachment`",
+        "A 'Copy Share Link' button copies a signed URL (JWT-protected, 72h expiry) to clipboard, allowing the video to be previewed by anyone with the link on the local network",
+        "A post-render feedback widget captures: productionWorthy (bool), overallRating (1-5), and a single open-text `wouldChange` field — stored to Campaign.userFeedbackJson and also to a standalone `CampaignFeedback` table for aggregation",
+        "A 'Create Another Campaign' button returns to the curate screen for the same Event with all previous selections cleared",
+        "The page shows a metadata summary: total duration, clip count, source footage used, music track info, and estimated file size",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Job status dashboard and real-time pipeline progress",
+      "description": "As a user, I want to see the real-time status of all background jobs for my events so that I always know what stage my content is at, what's currently processing, and what requires my attention — without relying solely on push notifications.",
+      "acceptanceCriteria": [
+        "Route `/dashboard` shows a list of all Events, each with a pipeline progress indicator showing which of the 5 stages is complete, in-progress, or pending — using status fields from Event and Campaign records",
+        "For each active background job, a progress row shows: job type (human-readable label), status (queued/running/done/failed), time elapsed since `startedAt`, and for RUNNING jobs, a pulsing indicator",
+        "The dashboard polls `GET /api/jobs/status` every 5 seconds when any job is in QUEUED or RUNNING state, and stops polling when all jobs are DONE or FAILED",
+        "Failed jobs display a human-readable error message and a 'Retry' button which resets the job to QUEUED status",
+        "The worker health endpoint (`http://localhost:3011/health`) is polled by the dashboard; if the worker is unreachable, a banner displays: 'Background worker is offline – jobs are paused. Run: npm run worker'",
+        "Clicking any stage row navigates to the relevant stage UI (curate / preview / download) when that stage is complete",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Immich tag write-back and GIS tag index sync",
+      "description": "As a developer, I want a robust bidirectional tag layer between GIS's DB and Immich's asset metadata so that tags are queryable in GIS's own DB (fast filtering) and also visible inside Immich's UI (discoverability).",
+      "acceptanceCriteria": [
+        "A `syncTagsToImmich(assetId: string, tags: string[])` function in `src/lib/immich.ts` calls `PUT /api/assets` with the asset's immichAssetId and a `description` field containing all GIS tags serialized as a newline-separated key:value string",
+        "A `searchAssetsByTag(tags: string[], eventId?: string)` function queries the GIS `AssetTag` table (not Immich API) for assets matching all provided tags, optionally scoped to an event — this bypasses the known Immich API gap where tag-based asset retrieval is not supported",
+        "When a user manually adds or removes a tag in the GIS curate UI, the AssetTag record is updated and `syncTagsToImmich` is called immediately",
+        "A `syncTagsFromImmich(eventId: string)` function fetches all asset descriptions from Immich for assets in the event and parses any `gis:` prefixed key:value pairs back into the AssetTag table with source=IMMICH_CLIP — allowing tags written externally (e.g. via Immich UI) to be pulled into GIS",
+        "The Immich CLIP smart search is proxied via `POST /api/search/smart` with the user's query forwarded to Immich's `/api/search/smart` endpoint, returning matching immichAssetIds which are then resolved to GIS Asset records",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": "The GIS DB is the source of truth for tag queries. Immich is the display layer. Never query Immich for tag-based filtering — always query the AssetTag table."
+    },
+    {
+      "id": "US-016",
+      "title": "next.config hardening, security headers, and environment validation",
+      "description": "As a developer, I want the Next.js configuration properly hardened so that the app does not have security gaps, sharp works server-side, external packages are correctly handled, and all required environment variables are validated at startup.",
+      "acceptanceCriteria": [
+        "`next.config.mjs` includes `experimental: { serverComponentsExternalPackages: ['sharp', 'fluent-ffmpeg'] }` to prevent bundling errors for native modules",
+        "Security headers are set in `next.config.mjs` headers() function: `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Content-Security-Policy` allowing self + the local Immich origin",
+        "A `src/lib/env.ts` module uses `zod` to parse and validate all required environment variables at startup: IMMICH_URL, IMMICH_API_KEY, VENICE_API_KEY, DATABASE_URL, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT — the server throws a descriptive error on first request if any are missing",
+        "VENICE_API_KEY and IMMICH_API_KEY are never included in any client-side bundle (verified by `next build` bundle analysis — no API keys in `.next/static/`)",
+        "All Venice API calls go through a server-side proxy route or are made exclusively in worker.ts / server components — never directly from the browser",
+        "Rate limiting middleware on `/api/` routes using a lightweight in-memory token bucket: max 60 requests/minute per IP for non-upload routes, 10/minute for upload routes",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "VAPID keys are required for Web Push. Generate them once with `web-push generate-vapid-keys` and store in .env."
+    },
+    {
+      "id": "US-017",
+      "title": "Feedback aggregation and AI scoring improvement loop",
+      "description": "As a product owner, I want user feedback from delivered campaigns to be aggregated weekly and analyzed by an LLM so that scoring weights and prompt configurations can be iteratively improved based on real human editorial judgment.",
+      "acceptanceCriteria": [
+        "A `CampaignFeedback` table exists with: id, campaignId, productionWorthy (bool), overallRating (int 1-5), wouldChange (string nullable), clipSentiments (JSON: { assetId, sentiment }[]), musicSatisfied (bool), createdAt",
+        "A `GET /api/admin/feedback-report` endpoint (admin-auth required) queries all CampaignFeedback records from the past 30 days, aggregates: avg rating, % productionWorthy, most-common wouldChange themes, clip sentiment distribution by clipType",
+        "A `runFeedbackAnalysis()` function sends the aggregated report to Venice (reasoning model) with a prompt asking for specific actionable recommendations on: score weight adjustments, duration threshold changes, keyword list gaps, music generation prompt improvements",
+        "The LLM response is stored in a `FeedbackAnalysisReport` table with: id, generatedAt, reportJson, recommendations (string), appliedAt (nullable)",
+        "A cron job (node-cron or systemd timer) runs `runFeedbackAnalysis()` every Sunday at 02:00 server time when at least 5 new CampaignFeedback records exist since the last run",
+        "The admin dashboard at `/admin/feedback` displays the latest analysis report and recommendations in readable form",
+        "Typecheck passes",
+        "Verify UI renders correctly in browser at expected route"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "This is the data flywheel. The scoring weights (currently hardcoded 50/30/20) should eventually be configurable via an admin settings table that this loop can update."
     }
   ]
 }

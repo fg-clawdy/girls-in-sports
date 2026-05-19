@@ -1,4 +1,5 @@
 import { PrismaClient, JobType, JobStatus } from "@prisma/client";
+export { JobType, JobStatus };
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { createServer, IncomingMessage, ServerResponse } from "http";

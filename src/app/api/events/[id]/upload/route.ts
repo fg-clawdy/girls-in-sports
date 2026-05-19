@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { processVideoForScenes } from "@/lib/scene-detection-service";
-import { analyzeFileQuality } from "@/lib/quality-gate-service";
+import { enqueueJob, JobType } from "@/lib/job-worker";
 
 const IMMICH_URL = process.env.IMMICH_API_URL || "http://localhost:2283";
 const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
@@ -33,15 +32,24 @@ export async function POST(
       return NextResponse.json({ error: "No files provided" }, { status: 400 });
     }
 
-    const uploadedAssetIds: string[] = [];
-    const errors: string[] = [];
+    const results: Array<{
+      fileName: string;
+      assetId?: string;
+      immichAssetId?: string;
+      status: "uploaded" | "failed";
+      error?: string;
+    }> = [];
 
     for (const file of files) {
       try {
-        // Upload to Immich with required metadata
+        // ── Stream to Immich ──
         const now = new Date().toISOString();
         const immichForm = new FormData();
-        immichForm.append("assetData", new Blob([await file.arrayBuffer()], { type: file.type }), file.name);
+        immichForm.append(
+          "assetData",
+          new Blob([await file.arrayBuffer()], { type: file.type }),
+          file.name
+        );
         immichForm.append("deviceAssetId", `${file.name}-${Date.now()}`);
         immichForm.append("deviceId", "gis-web-upload");
         immichForm.append("fileCreatedAt", now);
@@ -58,67 +66,116 @@ export async function POST(
 
         if (!uploadRes.ok) {
           const text = await uploadRes.text();
-          errors.push(`${file.name}: ${uploadRes.status} ${text}`);
+
+          // Create Asset record as FAILED
+          await prisma.asset.create({
+            data: {
+              eventId: params.id,
+              type: file.type.startsWith("video") ? "SOURCE_VIDEO" : "SOURCE_IMAGE",
+              status: "FAILED",
+              filePath: file.name,
+              sizeBytes: file.size,
+            },
+          });
+
+          results.push({
+            fileName: file.name,
+            status: "failed",
+            error: `Immich upload failed: ${uploadRes.status} ${text}`,
+          });
           continue;
         }
 
         const uploadData = await uploadRes.json();
-        if (uploadData.id) {
-          uploadedAssetIds.push(uploadData.id);
+        const immichAssetId = uploadData.id;
 
-          // Analyze quality in background
-          analyzeFileQuality(file).then(async (quality) => {
-            if (quality.flags.length > 0) {
-              await prisma.assetQualityFlag.create({
-                data: {
-                  assetId: uploadData.id,
-                  eventId: params.id,
-                  flags: quality.flags,
-                  brightness: quality.brightness,
-                  fileSize: quality.fileSize,
-                  duration: quality.duration,
-                },
-              });
-            }
-          }).catch((err) => {
-            console.warn(`Quality analysis failed for ${uploadData.id}:`, err);
+        if (!immichAssetId) {
+          // Duplicate or unexpected response
+          results.push({
+            fileName: file.name,
+            status: "uploaded",
+            error: "Duplicate or no asset ID returned from Immich",
           });
-        } else if (uploadData.duplicate) {
-          // Already exists — skip, no error
           continue;
         }
+
+        // ── Add to album ──
+        await fetch(`${IMMICH_URL}/api/albums/${event.immichAlbumId}/assets`, {
+          method: "PUT",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "x-api-key": IMMICH_KEY,
+          },
+          body: JSON.stringify({ ids: [immichAssetId] }),
+        });
+
+        // ── Create Asset record ──
+        const asset = await prisma.asset.create({
+          data: {
+            eventId: params.id,
+            immichAssetId,
+            type: file.type.startsWith("video") ? "SOURCE_VIDEO" : "SOURCE_IMAGE",
+            status: "UPLOADED",
+            filePath: file.name,
+            sizeBytes: file.size,
+          },
+        });
+
+        // ── Enqueue INGEST_CLIP job ──
+        await enqueueJob(JobType.INGEST_CLIP, {
+          assetId: asset.id,
+          immichAssetId,
+          eventId: params.id,
+          eventName: event.name,
+          fileName: file.name,
+        });
+
+        results.push({
+          fileName: file.name,
+          assetId: asset.id,
+          immichAssetId,
+          status: "uploaded",
+        });
       } catch (err) {
-        errors.push(`${file.name}: ${err instanceof Error ? err.message : "Upload failed"}`);
-      }
-    }
+        const msg = err instanceof Error ? err.message : "Upload failed";
 
-    // Add uploaded assets to the event's album
-    if (uploadedAssetIds.length > 0) {
-      await fetch(`${IMMICH_URL}/api/albums/${event.immichAlbumId}/assets`, {
-        method: "PUT",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "x-api-key": IMMICH_KEY,
-        },
-        body: JSON.stringify({ ids: uploadedAssetIds }),
-      });
+        // Create Asset record as FAILED
+        await prisma.asset.create({
+          data: {
+            eventId: params.id,
+            type: file.type.startsWith("video") ? "SOURCE_VIDEO" : "SOURCE_IMAGE",
+            status: "FAILED",
+            filePath: file.name,
+            sizeBytes: file.size,
+          },
+        });
 
-      // Fire-and-forget: trigger scene detection for each uploaded video
-      // This runs async in the background so the user doesn't wait
-      for (const assetId of uploadedAssetIds) {
-        processVideoForScenes(assetId, params.id).catch((err) => {
-          console.warn(`Background scene detection failed for ${assetId}:`, err);
+        results.push({
+          fileName: file.name,
+          status: "failed",
+          error: msg,
         });
       }
     }
 
-    return NextResponse.json({
-      success: true,
-      uploaded: uploadedAssetIds.length,
-      assetIds: uploadedAssetIds,
-      errors: errors.length > 0 ? errors : undefined,
-    });
+    // ── Update Event status if any assets were created ──
+    const uploadedCount = results.filter((r) => r.status === "uploaded").length;
+    if (uploadedCount > 0) {
+      await prisma.event.update({
+        where: { id: params.id },
+        data: { status: "INGESTING" },
+      });
+    }
+
+    return NextResponse.json(
+      {
+        success: true,
+        uploaded: uploadedCount,
+        results,
+      },
+      { status: 202 }
+    );
   } catch (error) {
     console.error("Event upload error:", error);
     return NextResponse.json(
