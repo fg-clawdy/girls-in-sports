@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { verifyToken, AUTH_COOKIE_NAME } from "./src/lib/auth";
+import { verifyToken, AUTH_COOKIE_NAME } from "./lib/auth";
 
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60; // 30 days in seconds
 
