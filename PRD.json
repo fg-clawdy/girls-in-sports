@@ -80,8 +80,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-19. Upload streams to Immich via x-api-key header, creates Asset rows, enqueues INGEST_CLIP jobs, returns 202. Frontend uses XMLHttpRequest per-file progress, dismissible error alerts, upload toast. Commit: ae02b5f."
     },
     {
       "id": "US-005",

@@ -1,3 +1,7 @@
+import { createWriteStream } from "fs";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
+
 const IMMICH_URL = process.env.IMMICH_API_URL || "http://localhost:2283";
 const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
 
@@ -140,4 +144,77 @@ export async function pingServer(): Promise<{ status: string }> {
 // Check if Immich is configured
 export function isImmichConfigured(): boolean {
   return Boolean(IMMICH_URL && IMMICH_KEY);
+}
+
+// --- Download / Upload helpers for worker ---
+
+export async function downloadAssetToFile(
+  assetId: string,
+  localPath: string
+): Promise<void> {
+  const res = await fetch(`${IMMICH_URL}/api/assets/${assetId}/original`, {
+    headers: {
+      Accept: "application/octet-stream",
+      "x-api-key": IMMICH_KEY,
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`Immich download failed: ${res.status} ${res.statusText}`);
+  }
+  if (!res.body) {
+    throw new Error("Immich download: empty response body");
+  }
+  await pipeline(Readable.fromWeb(res.body as any), createWriteStream(localPath));
+}
+
+export async function uploadAssetFromFile(
+  localPath: string,
+  deviceAssetId: string,
+  fileName: string,
+  fileCreatedAt: string,
+  fileModifiedAt: string,
+  fileType: string
+): Promise<string> {
+  const form = new FormData();
+  const { readFileSync } = await import("fs");
+  const buf = readFileSync(localPath);
+  form.append("assetData", new Blob([buf], { type: fileType }), fileName);
+  form.append("deviceAssetId", deviceAssetId);
+  form.append("deviceId", "gis-worker");
+  form.append("fileCreatedAt", fileCreatedAt);
+  form.append("fileModifiedAt", fileModifiedAt);
+
+  const res = await fetch(`${IMMICH_URL}/api/assets`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "x-api-key": IMMICH_KEY,
+    },
+    body: form as any,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Immich upload failed: ${res.status} ${text}`);
+  }
+  const data = await res.json();
+  return data.id as string;
+}
+
+export async function addAssetsToAlbum(
+  albumId: string,
+  assetIds: string[]
+): Promise<void> {
+  const res = await fetch(`${IMMICH_URL}/api/albums/${albumId}/assets`, {
+    method: "PUT",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "x-api-key": IMMICH_KEY,
+    },
+    body: JSON.stringify({ ids: assetIds }),
+  });
+  if (!res.ok) {
+    throw new Error(`Immich add to album failed: ${res.status}`);
+  }
 }
