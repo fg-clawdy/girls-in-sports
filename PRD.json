@@ -119,8 +119,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "Venice STT on video directly (not extracted audio) simplifies the pipeline and gives word-level timestamps tied to video frames. The keyword list should be stored in a configurable JSON config file per sport type."
+      "passes": true,
+      "notes": "Implemented 2026-05-19. handleScoreClip in src/lib/handlers/score-clip.ts: Venice STT on raw video, sport-specific keyword scoring, keyframe extraction (3/6/12), vision model batches of 3 with structured JSON response, motion score via ffmpeg scene density, composite 50/30/20 formula, clipType rules, ClipScore creation, AssetTag + Immich description write-back, parent Asset SCORED tracking, event thumbnail. Commit: b6532e5."
     },
     {
       "id": "US-007",

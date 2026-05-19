@@ -152,6 +152,13 @@ enum TargetFormat {
   HIGHLIGHT_60
 }
 
+enum EnergyPreset {
+  HYPE
+  INSPIRATIONAL
+  EMOTIONAL
+  INSTRUCTIONAL
+}
+
 enum CampaignStatus {
   DIRECTING
   SCRIPTED
@@ -169,6 +176,7 @@ model Campaign {
   userId         String?
   name           String
   targetFormat   TargetFormat
+  energyPreset   EnergyPreset   @default(HYPE)
   brief          String?
   status         CampaignStatus @default(DIRECTING)
   scriptJson     Json?          // ProductionScript
@@ -176,6 +184,7 @@ model Campaign {
   musicPrompt    String?
   proxyAssetId   String?
   finalAssetId   String?
+  selectedAssetIds String[]       // assetIds accepted into campaign
   userFeedbackJson Json?
   createdAt      DateTime       @default(now())
 
@@ -197,6 +206,8 @@ model CampaignClip {
   endTimeMs          Int?
   narrativeLabel     String?
   durationMultiplier Float    @default(1.0)
+  accepted           Boolean  @default(true)
+  mustInclude        Boolean  @default(false)
 
   @@index([campaignId])
   @@index([assetId])
