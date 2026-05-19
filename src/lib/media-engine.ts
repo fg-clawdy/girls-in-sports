@@ -41,15 +41,40 @@ async function downloadAssets(assetIds: string[], workDir: string): Promise<stri
     const dest = path.join(workDir, `${id}${ext}`);
     try {
       await downloadAsset(id, dest);
-      // Detect actual format and rename if needed
-      const metadata = await sharp(dest).metadata();
-      if (metadata.format && metadata.format !== "jpeg") {
-        const newDest = path.join(workDir, `${id}.${metadata.format}`);
-        await fs.rename(dest, newDest);
-        paths.push(newDest);
-      } else {
-        paths.push(dest);
+      // Detect actual format — try sharp first (images), then ffprobe (videos)
+      let detectedExt = "jpg";
+      let isVideo = false;
+      try {
+        const metadata = await sharp(dest).metadata();
+        if (metadata.format) {
+          detectedExt = metadata.format === "jpeg" ? "jpg" : metadata.format;
+        }
+      } catch {
+        // sharp failed — likely a video. Probe with ffprobe.
+        const probeResult = await new Promise<string>((resolve) => {
+          const proc = spawn("ffprobe", [
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            dest,
+          ], { stdio: ["ignore", "pipe", "ignore"] });
+          let out = "";
+          proc.stdout.on("data", (d) => (out += d));
+          proc.on("close", () => resolve(out.trim()));
+        });
+        if (probeResult) {
+          isVideo = true;
+          detectedExt = "mp4"; // default
+          const codec = probeResult.toLowerCase();
+          if (codec.includes("prores") || codec.includes("dnxhd")) detectedExt = "mov";
+          else if (codec.includes("mpeg2")) detectedExt = "mpg";
+          else if (codec.includes("avi")) detectedExt = "avi";
+        }
       }
+      const newDest = path.join(workDir, `${id}.${detectedExt}`);
+      await fs.rename(dest, newDest);
+      paths.push(newDest);
     } catch (err) {
       console.warn(`Failed to download asset ${id}:`, err);
     }
