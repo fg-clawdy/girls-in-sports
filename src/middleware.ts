@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { verifyToken, AUTH_COOKIE_NAME } from "./lib/auth";
+import { jwtVerify } from "jose";
+
+const JWT_SECRET = new TextEncoder().encode(
+  process.env.JWT_SECRET || "gis-local-secret-change-me"
+);
 
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60; // 30 days in seconds
 
@@ -8,16 +12,22 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Public routes - no auth required
-  if (
-    pathname === "/login" ||
-    pathname.startsWith("/api/auth")
-  ) {
+  if (pathname === "/login" || pathname.startsWith("/api/auth")) {
     return NextResponse.next();
   }
 
   // Check auth token
-  const token = request.cookies.get(AUTH_COOKIE_NAME)?.value;
-  const isValid = token ? verifyToken(token) : false;
+  const token = request.cookies.get("gis_auth_token")?.value;
+  let isValid = false;
+
+  if (token) {
+    try {
+      jwtVerify(token, JWT_SECRET);
+      isValid = true;
+    } catch {
+      isValid = false;
+    }
+  }
 
   // Protect all other routes
   if (!isValid) {
@@ -33,7 +43,7 @@ export function middleware(request: NextRequest) {
 
   // Refresh cookie on each authenticated request
   const response = NextResponse.next();
-  response.cookies.set(AUTH_COOKIE_NAME, token!, {
+  response.cookies.set("gis_auth_token", token!, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",

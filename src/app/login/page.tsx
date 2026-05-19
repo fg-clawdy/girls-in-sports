@@ -14,25 +14,31 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
+    console.log("[Login] Submitting...");
 
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
+        credentials: "include",
       });
 
+      console.log("[Login] Response status:", res.status);
       const data = await res.json();
+      console.log("[Login] Response data:", data);
 
       if (!res.ok) {
         setError(data.error || "Invalid credentials");
         return;
       }
 
+      console.log("[Login] Success — navigating to /dashboard");
       router.push("/dashboard");
       router.refresh();
-    } catch {
-      setError("Login failed");
+    } catch (err: any) {
+      console.error("[Login] Fetch error:", err);
+      setError(err?.message || "Login failed");
     } finally {
       setLoading(false);
     }
