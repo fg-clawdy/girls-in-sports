@@ -87,6 +87,7 @@ model CompositionFeedback {
   createdAt          DateTime @default(now())
 
   @@index([compositionId])
+  @@index([createdAt])
   @@map("composition_feedbacks")
 }
 
@@ -134,4 +135,31 @@ model AssetQualityFlag {
   @@index([eventId])
   @@index([assetId])
   @@map("asset_quality_flags")
+}
+
+model WeeklyCritique {
+  id              String   @id @default(cuid())
+  weekStart       DateTime // Monday of the week being analyzed
+  weekEnd         DateTime // Sunday of the week being analyzed
+  totalFeedback   Int      // Number of CompositionFeedback records analyzed
+  avgProductionWorthy Float? // Percentage rated as production-worthy
+
+  // Aggregated ratings (average 1-5 per dimension)
+  avgRatings      Json?    // { assetSelection, cutTiming, videoLength, transitions, musicFit, musicVolume, aspectRatioHandling, narrativeFlow, textOverlays }
+
+  topIssues       String[] // Most frequently tagged issues (e.g., "Too long", "Wrong music")
+  topLiked        String[] // Most common "liked most" freeform themes (extracted by LLM)
+  topChanges      String[] // Most common "would change" themes (extracted by LLM)
+
+  // LLM-generated critique text
+  critiqueText    String   @db.Text // Full narrative analysis
+  actionItems     String[] // Specific, actionable improvements for the pipeline
+
+  modelUsed       String   // Which LLM generated the critique
+  costDIEM        Float?
+
+  createdAt       DateTime @default(now())
+
+  @@index([weekStart])
+  @@map("weekly_critiques")
 }
