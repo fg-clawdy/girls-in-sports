@@ -68,6 +68,15 @@ function encodeImageToBase64(buffer: Buffer): string {
 const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
 
 async function fetchImageFromUrl(url: string): Promise<Buffer> {
+  // Handle inline data URLs (base64-encoded images from frame extraction)
+  if (url.startsWith("data:")) {
+    const base64Match = url.match(/base64,(.+)/);
+    if (base64Match) {
+      return Buffer.from(base64Match[1], "base64");
+    }
+    throw new Error("Invalid data URL format");
+  }
+
   // Strip any ?key= query param from the URL — Immich ignores it and it
   // conflicts with the required x-api-key header on some endpoints.
   const cleanUrl = url.replace(/[?&]key=[^&]+/, "").replace(/\?$/, "");
