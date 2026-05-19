@@ -12,7 +12,7 @@ model Event {
   name        String
   sport       String
   city        String
-  eventDate   DateTime
+   eventDate   DateTime
   description String?
   immichAlbumId String? // References Immich album
   thumbnailUrl  String? // Auto-selected best frame from vision ranking
@@ -162,4 +162,39 @@ model WeeklyCritique {
 
   @@index([weekStart])
   @@map("weekly_critiques")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// US-014: Lightweight Local Pre-Filter Model
+// Phase A: Fast image analysis using sharp + simple heuristics
+// Phase B (future): ONNX runtime with a distilled vision model
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model PreFilterScore {
+  id          String   @id @default(cuid())
+  assetId     String   // Immich asset ID
+  eventId     String
+
+  // Heuristic scores (0-100, computed locally, no API cost)
+  brightnessScore  Int?  // 0 = dark, 100 = well-exposed
+  blurScore        Int?  // 0 = blurry, 100 = sharp (Laplacian variance)
+  faceScore        Int?  // 0 = no face, 100 = clear face detected
+  actionScore      Int?  // 0 = static, 100 = high motion / dynamic
+  compositionScore Int?  // 0 = poor framing, 100 = good rule-of-thirds
+
+  // Combined quick-score for sorting before expensive vision API
+  overallScore     Int?  // weighted average
+
+  // Whether this passed the pre-filter gate for expensive analysis
+  passedFilter Boolean @default(false)
+
+  // Raw feature values for future model training
+  featuresJson Json?    // { laplacianVar: float, meanBrightness: float, edgeDensity: float, aspectRatio: float, ... }
+
+  createdAt   DateTime @default(now())
+
+  @@index([assetId])
+  @@index([eventId])
+  @@index([overallScore])
+  @@map("pre_filter_scores")
 }
