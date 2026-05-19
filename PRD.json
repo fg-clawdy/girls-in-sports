@@ -211,8 +211,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-19. /campaigns/[id]/preview page with video player (native controls), clip timeline scrubber with clickable seek-to-clip, music section with regenerate button, overall rating (Ready to Post / Needs Adjustment), per-clip sentiment (👍/👎/✂️/⚡), Approve for Final Render → RENDER_FINAL, Start Over → SCRIPTED. /api/campaigns/[id] GET/PATCH/POST."
     },
     {
       "id": "US-012",

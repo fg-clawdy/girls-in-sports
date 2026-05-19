@@ -15,6 +15,7 @@ import { handleScoreClip } from "../lib/handlers/score-clip";
 import { handleDirectScript } from "../lib/handlers/direct-script";
 import { handleGenerateMusic } from "../lib/handlers/generate-music";
 import { handleRenderProxy } from "../lib/handlers/render-proxy";
+import { handleRenderFinal } from "../lib/handlers/render-final";
 
 const HEALTH_PORT = parseInt(process.env.WORKER_HEALTH_PORT || "3011", 10);
 
@@ -32,6 +33,9 @@ registerHandler(JobType.GENERATE_MUSIC, async ({ payload, jobId }) => {
 });
 registerHandler(JobType.RENDER_PROXY, async ({ payload, jobId }) => {
   await handleRenderProxy({ payload, jobId });
+});
+registerHandler(JobType.RENDER_FINAL, async ({ payload, jobId }) => {
+  await handleRenderFinal({ payload, jobId });
 });
 
 setupGracefulShutdown();
