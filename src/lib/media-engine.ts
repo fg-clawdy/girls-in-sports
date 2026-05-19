@@ -315,29 +315,25 @@ export async function executeVideo(
     await runFFmpeg(["-i", segmentPaths[0], "-c", "copy", "-an", outputPath]);
   } else {
     // Build xfade filter_complex for crossfade between segments
-    // Each segment needs to be trimmed to avoid the crossfade overlap at the end
+    // No trimming — each segment stays full length, xfade handles the overlap
     const inputs: string[] = [];
     const filters: string[] = [];
-    const padDur = 0.01; // tiny safety pad
 
     for (let i = 0; i < segmentPaths.length; i++) {
       inputs.push("-i", segmentPaths[i]);
     }
 
-    // First pass: trim each segment to remove the trailing transition overlap
-    let streamCount = 0;
-    for (let i = 0; i < segmentPaths.length; i++) {
-      const clip = script.clips[i];
-      const dur = (clip?.duration || 5) - (i < segmentPaths.length - 1 ? transitionDur : 0);
-      filters.push(`[${i}:v]trim=start=0:end=${dur + padDur},setpts=PTS-STARTPTS[v${i}];`);
-      streamCount++;
-    }
+    let prevLabel = "0:v";
+    let cumulativeOffset = 0;
 
-    // Build xfade chain
-    let prevLabel = "v0";
     for (let i = 1; i < segmentPaths.length; i++) {
+      const prevDur = script.clips[i - 1]?.duration || 5;
+      cumulativeOffset += prevDur - transitionDur;
+
       const outLabel = i === segmentPaths.length - 1 ? "outv" : `tmp${i}`;
-      filters.push(`[${prevLabel}][v${i}]xfade=transition=fade:duration=${transitionDur}:offset=${(script.clips[i - 1]?.duration || 5) - transitionDur}[${outLabel}];`);
+      filters.push(
+        `[${prevLabel}][${i}:v]xfade=transition=fade:duration=${transitionDur}:offset=${cumulativeOffset}[${outLabel}];`
+      );
       prevLabel = outLabel;
     }
 

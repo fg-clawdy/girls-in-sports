@@ -8,7 +8,7 @@ export async function GET(
   try {
     const segments = await prisma.sceneSegment.findMany({
       where: { eventId: params.id },
-      orderBy: { parentId: "asc", startTime: "asc" },
+      orderBy: [{ parentId: "asc" }, { startTime: "asc" }],
     });
 
     // Group by parentId
