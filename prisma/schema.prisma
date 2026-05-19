@@ -7,23 +7,205 @@ datasource db {
   provider = "postgresql"
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// US-003: Asset Intelligence Layer
+// ═══════════════════════════════════════════════════════════════════════════════
+
+enum EventStatus {
+  UPLOADING
+  INGESTING
+  READY
+  ARCHIVED
+}
+
 model Event {
   id          String   @id @default(cuid())
   name        String
   sport       String
   city        String
-   eventDate   DateTime
+  eventDate   DateTime
   description String?
-  immichAlbumId String? // References Immich album
-  thumbnailUrl  String? // Auto-selected best frame from vision ranking
+  immichAlbumId String?
+  thumbnailUrl  String?
+  userId      String?
+  status      EventStatus @default(READY)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // Legacy relations (preserved for zero data loss)
   generatedAssets GeneratedAsset[]
   feedbackRatings FeedbackRating[]
 
+  // New asset intelligence layer
+  assets      Asset[]
+  campaigns   Campaign[]
+
   @@map("events")
 }
+
+// ── Asset Types ──
+
+enum AssetType {
+  SOURCE_VIDEO
+  SOURCE_IMAGE
+  CLIP
+  PROXY
+  FINAL
+}
+
+enum AssetStatus {
+  UPLOADED
+  INGESTING
+  SCORED
+  FAILED
+}
+
+model Asset {
+  id            String     @id @default(cuid())
+  eventId       String
+  event         Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  immichAssetId String?
+  type          AssetType
+  parentAssetId String?
+  parentAsset   Asset?     @relation("AssetParent", fields: [parentAssetId], references: [id])
+  childAssets   Asset[]    @relation("AssetParent")
+  filePath      String?
+  durationSeconds Float?
+  widthPx       Int?
+  heightPx      Int?
+  fps           Float?
+  codec         String?
+  sizeBytes     Int?
+  status        AssetStatus @default(UPLOADED)
+  ingestJobId   String?
+  createdAt     DateTime   @default(now())
+
+  clipScore     ClipScore?
+  assetTags     AssetTag[]
+  campaignClips CampaignClip[]
+
+  @@index([eventId])
+  @@index([immichAssetId])
+  @@index([parentAssetId])
+  @@map("assets")
+}
+
+// ── Clip Scoring ──
+
+enum ClipType {
+  ACTION
+  SPEECH
+  MIXED
+  MONTAGE
+}
+
+model ClipScore {
+  id               String   @id @default(cuid())
+  assetId          String   @unique
+  asset            Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  visionScore      Float?
+  audioScore       Float?
+  motionScore      Float?
+  compositeScore   Float?
+  clipType         ClipType?
+  hasFaces         Boolean  @default(false)
+  hasCoachSpeech   Boolean  @default(false)
+  hasActionKeyword Boolean  @default(false)
+  transcriptExcerpt String?
+  keywordHits      Json?    // { keyword: string, count: number }[]
+  scoredAt         DateTime @default(now())
+
+  @@map("clip_scores")
+}
+
+// ── Asset Tags ──
+
+enum AssetTagSource {
+  GIS_AI
+  USER_MANUAL
+  IMMICH_CLIP
+}
+
+model AssetTag {
+  id         String       @id @default(cuid())
+  assetId    String
+  asset      Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  tag        String
+  source     AssetTagSource @default(GIS_AI)
+  confidence Float?
+  createdAt  DateTime     @default(now())
+
+  @@unique([assetId, tag])
+  @@index([assetId])
+  @@index([tag])
+  @@map("asset_tags")
+}
+
+// ── Campaigns ──
+
+enum TargetFormat {
+  REEL_15
+  REEL_30
+  REEL_60
+  AD_15
+  AD_30
+  HIGHLIGHT_60
+}
+
+enum CampaignStatus {
+  DIRECTING
+  SCRIPTED
+  PROXY_READY
+  APPROVED
+  RENDERING
+  DONE
+  FAILED
+}
+
+model Campaign {
+  id             String         @id @default(cuid())
+  eventId        String
+  event          Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId         String?
+  name           String
+  targetFormat   TargetFormat
+  brief          String?
+  status         CampaignStatus @default(DIRECTING)
+  scriptJson     Json?          // ProductionScript
+  musicUrl       String?
+  musicPrompt    String?
+  proxyAssetId   String?
+  finalAssetId   String?
+  userFeedbackJson Json?
+  createdAt      DateTime       @default(now())
+
+  campaignClips  CampaignClip[]
+
+  @@index([eventId])
+  @@index([status])
+  @@map("campaigns")
+}
+
+model CampaignClip {
+  id                 String   @id @default(cuid())
+  campaignId         String
+  campaign           Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  assetId            String
+  asset              Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  order              Int
+  startTimeMs        Int?
+  endTimeMs          Int?
+  narrativeLabel     String?
+  durationMultiplier Float    @default(1.0)
+
+  @@index([campaignId])
+  @@index([assetId])
+  @@map("campaign_clips")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Legacy Models (preserved for zero data loss — to be deprecated in future migration)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 model GeneratedAsset {
   id           String      @id @default(cuid())
@@ -33,7 +215,7 @@ model GeneratedAsset {
   fileName     String
   filePath     String
   fileSize     Int         @default(0)
-  immichAssetId String?    // References Immich asset
+  immichAssetId String?
   compositionScript String? @db.Text
   costDIEM     Float?
   status       GenerationStatus @default(PENDING)
@@ -49,12 +231,12 @@ model GeneratedAsset {
 
 model SceneSegment {
   id          String   @id @default(cuid())
-  parentId    String   // Immich asset ID of the full video
+  parentId    String
   eventId     String
-  startTime   Float    // seconds from start of parent video
+  startTime   Float
   endTime     Float
   duration    Float
-  motionScore Float    // ffmpeg scene detection intensity
+  motionScore Float
   createdAt   DateTime @default(now())
 
   @@index([parentId])
@@ -68,7 +250,7 @@ model CompositionFeedback {
   generatedAsset     GeneratedAsset @relation(fields: [compositionId], references: [id], onDelete: Cascade)
 
   productionWorthy   Boolean
-  ratings            Json?    // { assetSelection, cutTiming, videoLength, transitions, musicFit, musicVolume, aspectRatioHandling, narrativeFlow, textOverlays }
+  ratings            Json?
 
   userIntent         String?  @db.Text
   generatedScript    Json?
@@ -95,7 +277,7 @@ model FeedbackRating {
   id         String        @id @default(cuid())
   eventId    String
   event      Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  sourceAssetId String     // Immich asset ID of the source media
+  sourceAssetId String
   generatedAssetId String?
   generatedAsset GeneratedAsset? @relation(fields: [generatedAssetId], references: [id], onDelete: SetNull)
   rating     RatingType
@@ -139,23 +321,21 @@ model AssetQualityFlag {
 
 model WeeklyCritique {
   id              String   @id @default(cuid())
-  weekStart       DateTime // Monday of the week being analyzed
-  weekEnd         DateTime // Sunday of the week being analyzed
-  totalFeedback   Int      // Number of CompositionFeedback records analyzed
-  avgProductionWorthy Float? // Percentage rated as production-worthy
+  weekStart       DateTime
+  weekEnd         DateTime
+  totalFeedback   Int
+  avgProductionWorthy Float?
 
-  // Aggregated ratings (average 1-5 per dimension)
-  avgRatings      Json?    // { assetSelection, cutTiming, videoLength, transitions, musicFit, musicVolume, aspectRatioHandling, narrativeFlow, textOverlays }
+  avgRatings      Json?
 
-  topIssues       String[] // Most frequently tagged issues (e.g., "Too long", "Wrong music")
-  topLiked        String[] // Most common "liked most" freeform themes (extracted by LLM)
-  topChanges      String[] // Most common "would change" themes (extracted by LLM)
+  topIssues       String[]
+  topLiked        String[]
+  topChanges      String[]
 
-  // LLM-generated critique text
-  critiqueText    String   @db.Text // Full narrative analysis
-  actionItems     String[] // Specific, actionable improvements for the pipeline
+  critiqueText    String   @db.Text
+  actionItems     String[]
 
-  modelUsed       String   // Which LLM generated the critique
+  modelUsed       String
   costDIEM        Float?
 
   createdAt       DateTime @default(now())
@@ -230,24 +410,19 @@ model PushSubscription {
 
 model PreFilterScore {
   id          String   @id @default(cuid())
-  assetId     String   // Immich asset ID
+  assetId     String
   eventId     String
 
-  // Heuristic scores (0-100, computed locally, no API cost)
-  brightnessScore  Int?  // 0 = dark, 100 = well-exposed
-  blurScore        Int?  // 0 = blurry, 100 = sharp (Laplacian variance)
-  faceScore        Int?  // 0 = no face, 100 = clear face detected
-  actionScore      Int?  // 0 = static, 100 = high motion / dynamic
-  compositionScore Int?  // 0 = poor framing, 100 = good rule-of-thirds
+  brightnessScore  Int?
+  blurScore        Int?
+  faceScore        Int?
+  actionScore      Int?
+  compositionScore Int?
+  overallScore     Int?
 
-  // Combined quick-score for sorting before expensive vision API
-  overallScore     Int?  // weighted average
-
-  // Whether this passed the pre-filter gate for expensive analysis
   passedFilter Boolean @default(false)
 
-  // Raw feature values for future model training
-  featuresJson Json?    // { laplacianVar: float, meanBrightness: float, edgeDensity: float, aspectRatio: float, ... }
+  featuresJson Json?
 
   createdAt   DateTime @default(now())
 
