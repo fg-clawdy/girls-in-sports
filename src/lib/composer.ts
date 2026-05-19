@@ -70,6 +70,7 @@ export interface VideoScript {
   }>;
   musicTempo: "upbeat" | "calm" | "dramatic" | "none";
   musicFile?: string; // optional path to background music file
+  bpm?: number; // detected BPM for beat-sync editing
   brandedOutro: {
     text: string;
     duration: number;

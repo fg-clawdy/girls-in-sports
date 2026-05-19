@@ -7,6 +7,7 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import sharp from "./sharp-wrapper";
 import type { CollageScript, VideoScript } from "./composer";
+import { analyzeBeats, getBeatAlignedDuration } from "./beat-sync-service";
 
 const OUTPUT_DIR = process.env.COMPOSITION_OUTPUT_DIR || "/tmp/gis-compositions";
 const IMMICH_URL = process.env.IMMICH_API_URL || "http://localhost:2283";
@@ -182,6 +183,18 @@ export async function executeVideo(
     }
   }
 
+  // ── BEAT SYNC: Analyze music BPM if musicFile provided ──
+  let beatData: { bpm: number; beatTimestamps: number[]; confidence: number } | null = null;
+  if (script.musicFile) {
+    try {
+      beatData = await analyzeBeats(script.musicFile);
+      script.bpm = beatData.bpm;
+      console.log(`Beat sync: detected ${beatData.bpm} BPM (${beatData.beatTimestamps.length} beats)`);
+    } catch (err) {
+      console.warn("Beat analysis failed, proceeding without beat sync:", err);
+    }
+  }
+
   // Build individual clip segments with proper scaling (preserve aspect ratio + letterbox)
   const segmentPaths: string[] = [];
 
@@ -193,7 +206,18 @@ export async function executeVideo(
     const segmentPath = path.join(workDir, `segment_${i.toString().padStart(3, "0")}.mp4`);
     segmentPaths.push(segmentPath);
 
-    const duration = clip.duration || 5;
+    let duration = clip.duration || 5;
+
+    // Beat sync: adjust duration to land on a musical beat
+    if (beatData && beatData.beatTimestamps.length > 0) {
+      const maxDuration = clip.duration ? clip.duration * 1.3 : 8; // allow 30% stretch
+      const alignedDuration = getBeatAlignedDuration(
+        duration,
+        beatData.beatTimestamps,
+        maxDuration
+      );
+      duration = alignedDuration;
+    }
 
     // Build filter_complex for text overlay
     let textFilter = "";
