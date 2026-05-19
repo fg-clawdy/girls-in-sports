@@ -192,8 +192,8 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "Stream copy at the cut stage means no quality loss and near-instant segment extraction. The CRF 28 + veryfast encode is only for the proxy output — the final render uses CRF 18 + slow."
+      "passes": true,
+      "notes": "Implemented 2026-05-19. handleRenderProxy in src/lib/handlers/render-proxy.ts: downloads clips from Immich, validates timestamps, stream-copy cuts via ffmpeg -ss/-to -c copy, concat demuxer assembly, 720x1280 vertical scale with pad, libx264 CRF 28 veryfast, AAC 128k, semi-transparent DRAFT watermark, optional music amix, uploads proxy to Immich, updates Campaign.proxyAssetId and status=PROXY_READY. Wired into worker.ts. Commit: 8b641d4."
     },
     {
       "id": "US-011",
