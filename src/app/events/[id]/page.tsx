@@ -1222,7 +1222,8 @@ export default function EventPage() {
                 src={`/api/immich/assets/${lightboxAsset.id}`}
                 controls
                 autoPlay
-                className="max-w-[90vw] max-h-[90vh]"
+                className="max-h-[90vh]"
+                style={{ aspectRatio: "9/16" }}
               />
             ) : (
               <img

@@ -163,11 +163,11 @@ export async function executeVideo(
   const workDir = path.join(OUTPUT_DIR, resultId);
   await ensureDir(workDir);
 
-  // Resolution mapping
+  // Resolution mapping — default vertical 9:16 for mobile-first
   const resolutionMap: Record<string, { w: number; h: number }> = {
-    "4K": { w: 3840, h: 2160 },
-    "1080p": { w: 1920, h: 1080 },
-    "720p": { w: 1280, h: 720 },
+    "4K": { w: 2160, h: 3840 },
+    "1080p": { w: 1080, h: 1920 },
+    "720p": { w: 720, h: 1280 },
   };
   const { w: outW, h: outH } = resolutionMap[script.resolution || "1080p"] || resolutionMap["1080p"];
 

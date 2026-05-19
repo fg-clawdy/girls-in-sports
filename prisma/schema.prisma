@@ -34,14 +34,59 @@ model GeneratedAsset {
   fileSize     Int         @default(0)
   immichAssetId String?    // References Immich asset
   compositionScript String? @db.Text
+  costDIEM     Float?
   status       GenerationStatus @default(PENDING)
   errorMessage String?
   createdAt    DateTime    @default(now())
   completedAt  DateTime?
 
   feedbackRatings FeedbackRating[]
+  compositionFeedbacks CompositionFeedback[]
 
   @@map("generated_assets")
+}
+
+model SceneSegment {
+  id          String   @id @default(cuid())
+  parentId    String   // Immich asset ID of the full video
+  eventId     String
+  startTime   Float    // seconds from start of parent video
+  endTime     Float
+  duration    Float
+  motionScore Float    // ffmpeg scene detection intensity
+  createdAt   DateTime @default(now())
+
+  @@index([parentId])
+  @@index([eventId])
+  @@map("scene_segments")
+}
+
+model CompositionFeedback {
+  id                 String   @id @default(cuid())
+  compositionId      String
+  generatedAsset     GeneratedAsset @relation(fields: [compositionId], references: [id], onDelete: Cascade)
+
+  productionWorthy   Boolean
+  ratings            Json?    // { assetSelection, cutTiming, videoLength, transitions, musicFit, musicVolume, aspectRatioHandling, narrativeFlow, textOverlays }
+
+  userIntent         String?  @db.Text
+  generatedScript    Json?
+  musicPrompt        String?  @db.Text
+  musicModel         String?
+  selectedAssetIds   String[]
+  outputDuration     Float?
+
+  freeformNotes      String?  @db.Text
+  likedMost          String?
+  wouldChange        String?
+
+  estimatedImpressions Int?
+  costDIEM           Float?
+
+  createdAt          DateTime @default(now())
+
+  @@index([compositionId])
+  @@map("composition_feedbacks")
 }
 
 model FeedbackRating {

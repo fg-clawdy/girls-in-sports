@@ -221,14 +221,16 @@ export default function ResultDetailPage() {
                   className="max-h-96 w-auto mx-auto rounded-lg shadow-sm"
                 />
               ) : isVideo ? (
-                <video
-                  controls
-                  className="w-full rounded-lg shadow-sm"
-                  style={{ maxHeight: "24rem" }}
-                >
-                  <source src={`/api/results/${id}/download`} type="video/mp4" />
-                  Your browser does not support the video tag.
-                </video>
+                <div className="mx-auto" style={{ maxWidth: "360px" }}>
+                  <video
+                    controls
+                    className="w-full rounded-lg shadow-sm"
+                    style={{ aspectRatio: "9/16" }}
+                  >
+                    <source src={`/api/results/${id}/download`} type="video/mp4" />
+                    Your browser does not support the video tag.
+                  </video>
+                </div>
               ) : (
                 <p className="text-zinc-500">Unknown output type</p>
               )}

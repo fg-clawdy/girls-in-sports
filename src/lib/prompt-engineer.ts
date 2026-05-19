@@ -63,7 +63,7 @@ Your medium is ffmpeg and structured EDLs. You do not generate pixels directly �
     "backgroundColor": "#1E3A5F",
     "textColor": "#FFFFFF"
   },
-  "resolution": "1080p"
+  "resolution": "1080p" // 1080x1920 vertical (9:16 mobile-first)
 }
 
 ## Composition Rules
@@ -272,7 +272,7 @@ Your job: Design a branded, print-ready collage poster from selected camp media.
 - Use ONLY provided asset IDs
 - Brand colors: primary #D13B3F, secondary #1E3A5F, accent #F4C542
 - Tone: empowering, energetic, celebratory
-- Default dimensions: 2400×3600 (8×12" at 300dpi portrait) or 3600×2400 (landscape)
+- Default dimensions: 1080×1920 (9:16 vertical for mobile/social)
 - Include a branded header/title and a tagline/footer
 
 Return ONLY valid JSON.`;

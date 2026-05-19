@@ -1,0 +1,283 @@
+{
+  "project": "GIS AI Composition & Feedback Platform",
+  "branchName": "clawdy/gis-ai-refinement",
+  "description": "Mobile-first (9:16) AI video composition with upload-time scene detection, multi-layered user feedback, A/B testing, beat-sync cuts, and a data flywheel for continuous improvement via LLM critique and lightweight ML ranking.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Switch default composition output to vertical 9:16 (1080x1920)",
+      "description": "As a GIS staff member, I want all generated videos to be vertical/mobile-first so they are ready for Instagram Reels and TikTok without manual reformatting.",
+      "acceptanceCriteria": [
+        "Default output resolution is 1080x1920 across all composition engines",
+        "ffmpeg scale+pad filters use 9:16 dimensions",
+        "Horizontal images/videos are letterboxed top/bottom, not stretched",
+        "Vertical images/videos fill the full frame",
+        "Preview player on composition review page renders in 9:16",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Foundational change affecting every downstream composition feature. Must be implemented before any other composition work."
+    },
+    {
+      "id": "US-002",
+      "title": "Add SceneSegment and CompositionFeedback Prisma models",
+      "description": "As a developer, I need database tables to store video scene segments and user feedback so the system can track quality over time and feed the ML pipeline.",
+      "acceptanceCriteria": [
+        "SceneSegment model exists with: id, parentId, eventId, startTime, endTime, duration, motionScore, immichId, createdAt, isScene",
+        "CompositionFeedback model exists with: id, compositionId, productionWorthy, ratings JSON (cutTiming, musicFit, videoLength, transitions, assetSelection, musicVolume, aspectRatioHandling, narrativeFlow, textOverlays), userIntent, generatedScript JSON, musicPrompt, musicModel, selectedAssetIds, outputDuration, freeformNotes, likedMost, wouldChange, costDIEM, createdAt",
+        "Asset model updated with: hasScenes (boolean), isScene (boolean)",
+        "Migration runs successfully against existing data (nullable fields for backwards compat)",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Required by all downstream features. Keep ratings as JSONB for flexibility."
+    },
+    {
+      "id": "US-003",
+      "title": "Implement async upload-time ffmpeg scene detection",
+      "description": "As a GIS staff member uploading videos, I want the system to automatically detect scenes in the background so I don't wait when composing.",
+      "acceptanceCriteria": [
+        "Cronjob runs every 2 minutes polling for unprocessed video assets",
+        "ffmpeg scene detection executes with select='gt(scene,0.3)',showinfo",
+        "Each detected scene creates a SceneSegment record",
+        "Parent Asset is tagged hasScenes=true after processing",
+        "Scenes are NOT inserted as new Immich assets (only DB records)",
+        "Job handles failure gracefully (retry 3x, then mark failed)",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Assumption: Only new uploads processed retroactively via separate batch story (US-012)."
+    },
+    {
+      "id": "US-004",
+      "title": "Implement source quality gate on upload",
+      "description": "As a GIS staff member, I want the system to flag low-quality uploads (dark, blurry, tiny) so I know before composing.",
+      "acceptanceCriteria": [
+        "On upload, extract single frame and run sharp.stats() for brightness",
+        "Flag mean brightness < 30 as 'Very dark'",
+        "Flag mean brightness > 250 as 'Very bright/overexposed'",
+        "Flag file size < 50KB for images as 'Low resolution'",
+        "Flag video duration < 1s as 'Too short'",
+        "Flags shown as non-blocking warning badges in asset grid",
+        "User can still select and compose with flagged assets",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Fast heuristic approach. No ML required. Keep non-blocking."
+    },
+    {
+      "id": "US-005",
+      "title": "Update event asset grid select-all to exclude full videos with scenes",
+      "description": "As a GIS staff member, when I click 'Select All' in an event, full videos with detected scenes should NOT be selected by default, encouraging use of scene segments instead.",
+      "acceptanceCriteria": [
+        "selectAll() filters out assets where type=VIDEO and hasScenes=true",
+        "Scene segments (isScene=true) ARE included in selectAll",
+        "Images are always included in selectAll",
+        "Full videos without scenes ARE included in selectAll",
+        "User can manually click a full video to select it individually",
+        "Verify UI renders correctly in browser at expected route",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Depends on US-003 (scene detection)."
+    },
+    {
+      "id": "US-006",
+      "title": "Show warning when full video and its scenes are both selected",
+      "description": "As a GIS staff member, if I accidentally select both a full video and its scene segments, I should see a warning that this may create duplicate content.",
+      "acceptanceCriteria": [
+        "On clicking Compose, system checks if any selected full video's ID matches a selected scene's parentId",
+        "If overlap detected, show modal: 'This full video contains scenes already selected. Using both may create duplicate content. Proceed anyway?'",
+        "User can click 'Go back and fix' or 'Proceed anyway'",
+        "Warning only fires when overlap exists",
+        "Verify UI renders correctly in browser at expected route",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Depends on US-005."
+    },
+    {
+      "id": "US-007",
+      "title": "Implement scene-clustered frame extraction for vision ranking",
+      "description": "As the AI system, I want to sample frames clustered within detected scenes rather than spread evenly across the whole video, so scene-level quality is preserved.",
+      "acceptanceCriteria": [
+        "For videos with scenes, distribute frame budget (max 24) across detected scenes proportionally by duration",
+        "Frame timestamps computed per-scene, not per-video",
+        "Edge/core weighting (0.7x/1.0x) applied within each scene's local boundaries",
+        "Videos without scenes fall back to current whole-video frame extraction",
+        "No increase in API calls per video (same total frame count)",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Depends on US-003. Core fix for the dilution problem."
+    },
+    {
+      "id": "US-008",
+      "title": "Implement thumbnail auto-select from best-scored frame",
+      "description": "As a GIS staff member, I want the system to automatically pick the best frame from each composition as the thumbnail/cover image.",
+      "acceptanceCriteria": [
+        "During frame extraction, compute thumbnailScore per frame: face detected +20, face in center-third +10, brightness 100-200 +10, action/blur +5",
+        "Highest-scored frame is saved as the composition's coverImageUrl",
+        "Cover image is shown in the results list and share previews",
+        "If no faces detected, highest vision-scored frame is used as fallback",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Reuses existing frame extraction data. Minimal extra compute."
+    },
+    {
+      "id": "US-009",
+      "title": "Implement beat-sync cuts using librosa BPM detection",
+      "description": "As a GIS staff member, when I add background music to a composition, I want an option to sync clip boundaries to the music beat for a professional feel.",
+      "acceptanceCriteria": [
+        "After music is generated, extract audio and run librosa.beat.tempo() + beat tracking",
+        "Beat timestamps are computed and stored with the composition",
+        "User toggle 'Sync cuts to music beat' appears on music mixing panel",
+        "When enabled, clip start/end times snap to nearest beat timestamp (±100ms tolerance)",
+        "When disabled, clip timings use original script values",
+        "Beat-sync script is re-validated before ffmpeg execution",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Python librosa called via child_process.spawn from Node.js. Add python requirements to project."
+    },
+    {
+      "id": "US-010",
+      "title": "Implement multi-layered feedback collection UI",
+      "description": "As a GIS staff member, after watching a rendered composition, I want to provide structured feedback so the system learns my preferences over time.",
+      "acceptanceCriteria": [
+        "After video plays, prompt: 'Would you use this for production?' [Yes / No]",
+        "If No, show: 'What was the biggest issue?' [Too long / Bad cuts / Wrong music / Poor asset selection / Other]",
+        "If Yes, show 1-5 sliders for: assetSelection, cutTiming, videoLength, transitions, musicFit, musicVolume, aspectRatioHandling, narrativeFlow, textOverlays",
+        "Optional freeform text: 'What did you like most?' and 'What would you change?'",
+        "Optional input: 'Estimated social media impressions' (number field)",
+        "All feedback is saved to CompositionFeedback table with full context (script, intent, assets, cost)",
+        "Verify UI renders correctly in browser at expected route",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Data flywheel foundation. Must be pleasant and fast to complete or users won't participate."
+    },
+    {
+      "id": "US-011",
+      "title": "Implement cost-gated A/B composition testing",
+      "description": "As a GIS staff member, when a composition costs less than 1 DIEM, I want the system to generate a second variant with different parameters so I can pick the better one.",
+      "acceptanceCriteria": [
+        "Before composition: call Venice /auth/billing API to get balanceBefore",
+        "After composition: get balanceAfter, compute costDIEM = balanceBefore - balanceAfter",
+        "Store costDIEM on the composition record",
+        "If costDIEM < 1.0, generate Variant B with: clipDurationMultiplier=0.7, transitionType='cut' (or alternate asset ordering)",
+        "If costDIEM >= 1.0, only Variant A is generated",
+        "When both variants exist, show side-by-side preview with 'Which feels better?' picker",
+        "Winner is logged to DB with variant metadata for ML training",
+        "Verify UI renders correctly in browser at expected route",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "Venice billing endpoint must be confirmed. Fallback: skip A/B if billing API unavailable."
+    },
+    {
+      "id": "US-012",
+      "title": "Implement retroactive scene detection batch job for existing videos",
+      "description": "As a developer, I need a one-time batch job to process all existing videos in the system that were uploaded before the scene detection cron was active.",
+      "acceptanceCriteria": [
+        "One-time script processes all Asset records where type=VIDEO and hasScenes is null/false",
+        "Runs same ffmpeg scene detection logic as US-003",
+        "Creates SceneSegment records for each detected scene",
+        "Updates parent Asset hasScenes=true",
+        "Runs with rate limiting (max 2 concurrent ffmpeg processes)",
+        "Outputs progress log: total processed, scenes found, failures",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "One-time operation. Can be run manually via script or cron."
+    },
+    {
+      "id": "US-013",
+      "title": "Implement LLM weekly critique cron (feedback analysis engine)",
+      "description": "As a GIS developer, I want an automated weekly report that analyzes user feedback patterns and suggests prompt template improvements.",
+      "acceptanceCriteria": [
+        "Weekly cron runs every Sunday at 3 AM",
+        "Pulls all CompositionFeedback rows from past 7 days",
+        "Groups by failure mode and correlates with features (intent, duration, scores)",
+        "Sends structured prompt to LLM with sample feedback rows",
+        "LLM outputs JSON: hypotheses[{pattern, frequency, suggestedFix, confidence}]",
+        "Report is saved to DB or sent to configured channel (log file)",
+        "Human-readable summary generated alongside JSON",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "Depends on US-010 (feedback collection). Start simple — just pattern detection, no auto-prompt patching yet."
+    },
+    {
+      "id": "US-014",
+      "title": "Implement lightweight local pre-filter model (ML Phase A)",
+      "description": "As the AI system, I want a fast local model that predicts user rating from frame embeddings and audio features, reducing expensive Venice API calls for low-quality scenes.",
+      "acceptanceCriteria": [
+        "Extract CLIP embeddings for each frame during upload-time processing (cached in DB)",
+        "Store audio features (RMS energy, spectral centroid) alongside SceneSegment",
+        "Train a gradient-boosted classifier (or fine-tuned MobileNet) on feedback data",
+        "Model predicts: productionWorthy (binary) and expected composite rating (1-5)",
+        "Retraining triggers: weekly cron + threshold of 50 new feedback entries since last train",
+        "Inference runs locally in <200ms per scene",
+        "Low-scoring scenes (< 2.5 predicted) are deprioritized in composition but not hidden",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "Requires ~200 feedback entries to be useful. Can be scaffolded before data exists. Phase B (preference embeddings) explicitly out of scope until 500+ entries."
+    }
+  ],
+  "outOfScope": [
+    "Multi-format auto-variants (square 1:1, horizontal 16:9) — Phase 2",
+    "ML Phase B: Per-user preference embeddings and prompt personalization — requires 500+ feedback entries",
+    "Social media publishing integrations (direct post to Instagram, Pinterest, Facebook)",
+    "Real-time collaboration or multi-user simultaneous editing",
+    "Advanced source separation (spleeter/demucs) for music vs speech",
+    "Auto-music generation during initial composition (music remains post-processing step)",
+    "Reinforcement learning for composition optimization",
+    "Near-duplicate image detection and deduplication warnings",
+    "Video stabilization or AI upscaling of low-quality uploads"
+  ],
+  "techStack": {
+    "frontend": "Next.js 14, React, Tailwind CSS",
+    "backend": "Next.js API routes, Prisma ORM, PostgreSQL",
+    "mediaStorage": "Immich (self-hosted)",
+    "aiModels": "Venice.ai (vision: z-ai-glm-5v-turbo, STT: openai/whisper-large-v3, LLM: kimi-k2-6)",
+    "videoProcessing": "ffmpeg via child_process.spawn",
+    "audioAnalysis": "librosa (Python, called via spawn)",
+    "mlTraining": "scikit-learn / XGBoost (Python) or TensorFlow.js",
+    "scheduling": "Hermes cronjobs or node-cron",
+    "embeddings": "CLIP (openai/clip-vit-base-patch32 via Python transformers)"
+  },
+  "assumptions": [
+    "Only new video uploads trigger scene detection automatically; existing videos require manual batch job (US-012)",
+    "Scene segments are stored as DB records only, not as separate Immich assets",
+    "Venice.ai billing API endpoint returns DIEM balance; if unavailable, A/B testing is skipped gracefully",
+    "librosa Python dependency can be installed on the host (GIS server)",
+    "GIS staff count stays < 5 users, so no multi-user concurrency concerns",
+    "User feedback participation rate of ~30% is sufficient to train the lightweight model",
+    "All compositions default to 9:16 vertical; other formats require manual override (not in scope)"
+  ],
+  "successMetrics": {
+    "productionWorthyRate": ">= 70% of compositions rated production-worthy by users",
+    "avgFeedbackScore": ">= 3.5 out of 5 across all rating dimensions within 90 days",
+    "costPerComposition": "Track and target <= 2 DIEM average for full pipeline (ranking + composition + music)",
+    "sceneDetectionCoverage": "100% of new video uploads processed within 5 minutes of upload",
+    "feedbackParticipationRate": ">= 30% of rendered compositions receive user feedback",
+    "impressionsTracked": "Optional impressions field captures data for 50%+ of shared compositions"
+  }
+}

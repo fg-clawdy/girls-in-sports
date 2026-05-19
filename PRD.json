@@ -1,200 +1,153 @@
 {
-  "project": "GIS MVP - Girls In Sports Media Catalog & AI Marketing Composer",
-  "branchName": "clawdy/gis-media-mvp",
-  "description": "Next.js PWA on port 3010 that leverages Immich for media storage/distribution. AI-orchestrated marketing material creation using LLM planning + ffmpeg/media tools to compose collages and videos from existing camp media. Includes feedback loop via positive/negative example albums for future prompt improvement. Directors upload via Immich; GIS app handles catalog, selection, AI analysis, composition, and results.",
-  "userStories": [
+  "title": "Girls In Sports — AI Video Composition & Media Ranking",
+  "description": "AI-powered video segmentation, audio analysis, and smart composition for youth sports marketing content.",
+  "stories": [
     {
-      "id": "US-001",
-      "title": "Project Bootstrap — Next.js + Prisma + PostgreSQL on port 3010",
-      "description": "As a developer, I want the GIS app scaffolded with the same Next.js/Prisma stack as DojoMojo so that I have a consistent, familiar foundation.",
+      "id": "GIS-001",
+      "title": "Intent-driven video composition with user editing",
+      "description": "User describes intent, AI generates production script, user edits before execution. Hidden prompts in prompt-engineer.ts.",
       "acceptanceCriteria": [
-        "Next.js 14+ app initialized and running on port 3010",
-        "Prisma schema file exists with PostgreSQL datasource configured",
-        "Database connection succeeds on startup",
+        "User intent textarea opens before composition type selection",
+        "AI generates script based on user intent + selected assets",
+        "User can edit the generated script before executing",
         "Typecheck passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Implemented. Next.js 14.2.35, React 18, Prisma 7.8.0 with @prisma/adapter-pg, Tailwind 3.4.1. Schema includes Event, GeneratedAsset, FeedbackRating. PostgreSQL database girlsinsports synced. Build passes, tsc clean. Committed as 5428390."
+      "notes": "Completed 2026-05-18. Implemented prompt-engineer.ts, updated composer.ts, event page UI, composition API. Commit: f185410."
     },
     {
-      "id": "US-002",
-      "title": "Static Auth Gateway",
-      "description": "As a director, I want a simple login gate so that the app is protected without complex auth for MVP, while the architecture supports upgrading to full auth later.",
+      "id": "GIS-002",
+      "title": "Vision AI error handling with configuration states",
+      "description": "Distinguish 'not configured' vs 'configured but failed' vs 'spend limit' in vision API errors.",
       "acceptanceCriteria": [
-        "Login page exists with static username/password (env-configured)",
-        "Authenticated sessions persist via HTTP-only cookie",
-        "All routes behind the gateway redirect unauthenticated users to login",
-        "Auth middleware is modular — easily swappable for full OAuth/NextAuth later",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
+        "Error response includes visionConfigured boolean",
+        "UI shows distinct banners for each error type",
+        "402 spend limit detected and surfaced",
+        "Typecheck passes"
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Implemented: login page, POST /api/auth/login/logout, JWT cookie sessions, middleware.ts route guards, dashboard placeholder. Committed as 6e1b5f5."
+      "notes": "Completed 2026-05-18. Updated vision rank route and event page. Commit: 641eeb9."
     },
     {
-      "id": "US-003",
-      "title": "Immich Integration — Album & Asset Discovery",
-      "description": "As a director, I want the GIS app to discover and display Immich albums and assets so that I can browse all camp media uploaded via the Immich mobile app.",
+      "id": "GIS-003",
+      "title": "Batch ranking for all media with progress UI",
+      "description": "Analyze all assets (not just 3) with real-time progress updates. Support videos via frame extraction.",
       "acceptanceCriteria": [
-        "Immich server URL and API key are configurable via environment variables",
-        "App fetches albums from Immich API and displays them in the GIS UI",
-        "Albums are mapped to GIS events via metadata (event name, sport, city, date)",
-        "App fetches asset thumbnails and metadata (file type, dimensions, upload date) from Immich",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
+        "Batch endpoint processes all assets in batches of 3",
+        "Progress bar shows completed/failed/total batches",
+        "Videos analyzed via frame extraction",
+        "Typecheck passes"
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Implemented: src/lib/immich.ts with albums/assets/thumbnails. API routes for albums and album detail. Thumbnail proxy. Committed as b08df59."
+      "notes": "Completed 2026-05-18. Created batch ranking route, updated event page with progress UI. Commit: 36b983c."
     },
     {
-      "id": "US-004",
-      "title": "Event Catalog & Media Browser",
-      "description": "As a director, I want to browse media by GIS event with filtering so that I can quickly find relevant photos and videos.",
+      "id": "GIS-004",
+      "title": "Variable-density frame extraction for video ranking",
+      "description": "Core zones get 2x more frames than edge zones. Edge frames weighted 0.7x, core frames 1.0x.",
       "acceptanceCriteria": [
-        "Event list page displays all GIS events with thumbnail previews",
-        "Event detail page shows all associated media in a responsive grid",
-        "Filters available: sport, city, date range, file type (image/video)",
-        "Media grid supports lazy loading for performance",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
+        "Edge zones (first/last 20%) sample at 1 frame / 2.0s",
+        "Core zone (middle 60%) samples at 1 frame / 1.0s",
+        "Temporal weighting applied in score calculation",
+        "Typecheck passes"
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Implemented: /events/[id] page with header, description, responsive grid, All/Photos/Videos filter, lazy-loaded thumbnails. Committed as a1c5d67."
+      "notes": "Completed 2026-05-18. Rewrote batch route variable-density logic. Commit: 69dbbfd."
     },
     {
-      "id": "US-005",
-      "title": "Media Selection & Output Type Selection",
-      "description": "As a director, I want to select media and choose an output format so that I can request composed marketing materials.",
+      "id": "GIS-005",
+      "title": "Venice AI STT integration for audio-weighted scoring",
+      "description": "Extract audio from videos, transcribe via Venice AI Whisper, score based on keywords + speech density.",
       "acceptanceCriteria": [
-        "Users can multi-select individual media assets with checkboxes",
-        "'Select All' toggle available for the current filtered view",
-        "After selection, user chooses output type: Collage Poster, 15s Highlight Video, or Full Wrap-up Video",
-        "Optional 'Let AI choose the best' toggle that passes all media to the ranking layer",
-        "Selection state persists while navigating within the event",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
+        "Audio extracted via ffmpeg to 16kHz mono WAV",
+        "STT via Venice API with openai/whisper-large-v3",
+        "Keyword detection with sports-specific vocabulary",
+        "Audio score blended into final score (30% weight)",
+        "Typecheck passes"
       ],
       "priority": 5,
       "passes": true,
-      "notes": "Implemented: selection mode with checkboxes, select/deselect all, count badge, Let AI choose checkbox, output type slide-up panel with 3 options. Committed as 18f8eed."
+      "notes": "Completed 2026-05-18. Created audio-analysis.ts, integrated into batch route, updated UI badges. Commit: a847f97."
     },
     {
-      "id": "US-006",
-      "title": "AI Layer 1 — Vision Analysis & Best Media Ranking via Venice.ai",
-      "description": "As a director, I want the AI to analyze selected media and rank the best shots so that the final composition uses only high-quality, impactful content.",
+      "id": "GIS-006",
+      "title": "Video segmentation engine — scene detection + multi-segment extraction",
+      "description": "ffmpeg scene detection, dense per-scene frame sampling, audio-to-scene mapping, multi-segment extraction with variable durations.",
       "acceptanceCriteria": [
-        "App sends selected media (or all, if 'AI choose best' is selected) to Venice.ai vision model",
-        "Vision prompt instructs the model to evaluate: composition, action/motion, faces visible, lighting, emotional impact, relevance to youth sports",
-        "Model returns ranked list of asset IDs with confidence scores and brief justification per asset",
-        "Top-ranked assets are selected for the composition layer",
-        "If manual selection was used, ranking acts as a secondary filter/reordering",
+        "ffmpeg scene detection produces natural cut points",
+        "Frames sampled densely within each scene",
+        "Audio segments mapped to scenes by timestamp overlap",
+        "Multiple ProductionSegments extracted per video",
+        "Variable durations: action 1.5-6s, speech 5-25s",
+        "Combined scoring: vision 50%, audio 30%, motion 20%",
         "Typecheck passes"
       ],
       "priority": 6,
       "passes": true,
-      "notes": "Implemented: src/lib/vision.ts model-agnostic layer. Evaluates composition (20), action (20), faces (20), lighting (15), relevance (15), technical (10). POST /api/ai/vision/rank. UI ranking modal with gold/silver/bronze badges. Fallback ranking when model unavailable. Committed as 37ef36d."
+      "notes": "Completed 2026-05-19. Created video-segmentation.ts with full pipeline. Commit: 1546173."
     },
     {
-      "id": "US-007",
-      "title": "AI Layer 2 — Composition Script Generation via Venice.ai LLM",
-      "description": "As a director, I want the AI to plan the composition (layout, order, cuts, transitions, captions) so that the final output tells a compelling story about the event.",
+      "id": "GIS-007",
+      "title": "Wire segmentation engine into batch ranking API",
+      "description": "Replace current frame extraction in batch route with full scene-aware segmentation pipeline. Store per-asset frame scores for composition reuse.",
       "acceptanceCriteria": [
-        "App sends ranked media list + event metadata + output type to Venice.ai text model",
-        "LLM returns a structured composition script: for collages — grid layout, image positions, caption text; for videos — clip order, durations, transitions, music tempo suggestion",
-        "Script includes branded captions (event name, sport, city, date) styled appropriately",
-        "Script is validated against available media before execution",
-        "User can review and edit the generated script before execution",
+        "Batch route calls segmentVideo() instead of uniform frame extraction",
+        "Frame scores stored in response for composition reuse",
+        "Audio analysis runs in parallel with frame extraction",
+        "Backward compatibility maintained for image assets",
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "Implemented: src/lib/composer.ts model-agnostic director. Typed CollageScript and VideoScript outputs with brand-aware colors. POST /api/ai/composition. UI review panel with human-readable summary and raw JSON. Committed as 86386e9."
+      "passes": false,
+      "notes": "Blocked: video-segmentation.ts created but not wired into batch route. Need to replace extractVideoFrames() calls with segmentVideo() pipeline."
     },
     {
-      "id": "US-008",
-      "title": "Media Composition Engine — ffmpeg + Image Tools Execution",
-      "description": "As a director, I want the app to execute the AI-planned composition using media tools so that I receive a polished final file.",
+      "id": "GIS-008",
+      "title": "Update composition API for smart trimming",
+      "description": "Composition script includes startTime/endTime per clip. ffmpeg commands use -ss and -t for precise extraction.",
       "acceptanceCriteria": [
-        "Server-side composition engine accepts a composition script and source media files",
-        "For Collage Posters: uses image manipulation library (sharp/libvips or Pillow) to crop, resize, arrange images per script, overlay text/captions, apply branded color borders",
-        "For Videos: uses ffmpeg to concatenate clips, apply transitions, add text overlays, match durations to script, output MP4 at appropriate resolution",
-        "Composition runs asynchronously with progress tracking",
-        "Failed compositions surface readable error logs",
+        "Composition script schema includes trimStart and trimDuration per clip",
+        "ffmpeg composition respects trim windows",
+        "Fallback to full clip if trim data unavailable",
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "Implemented: src/lib/media-engine.ts with executeCollage() via sharp (canvas, composite, text overlay) and executeVideo() via ffmpeg (concat, zoompan, drawtext, branded outro). POST /api/composition/execute creates DB record, executes, updates status. Committed as 930f68c."
+      "passes": false,
+      "notes": "Depends on GIS-007. Need ProductionSegment data threaded from ranking to composition."
     },
     {
-      "id": "US-009",
-      "title": "Results Catalog & Immich Upload",
-      "description": "As a director, I want generated marketing materials saved to Immich and browsable in the app so that I can download them via the Immich mobile app.",
+      "id": "GIS-009",
+      "title": "UI for multi-segment video display",
+      "description": "Ranking panel shows multiple candidate segments per video with type badges, timestamps, and score breakdowns.",
       "acceptanceCriteria": [
-        "Generated files are uploaded to a dedicated 'GIS Generated' album in Immich via server-side API",
-        "Generated assets are cataloged in the app's database with metadata: source event, output type, composition script used, generation date",
-        "Results page displays all generated materials with preview thumbnails from Immich",
-        "Each result includes: download link (via Immich), event info, output type, created date",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
+        "Video cards show multiple segment candidates",
+        "Each segment displays type badge (action/speech/mixed/montage)",
+        "Timestamps shown as MM:SS ranges",
+        "Score breakdown visible (vision/audio/motion)",
+        "Typecheck passes"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "Implemented: GET /api/results, GET /api/results/[id], POST /api/results/[id]/upload. /results catalog page and /results/[id] detail. Uploads via multipart/form-data to Immich API, optionally adds to event album. Committed as bdde0f3."
+      "passes": false,
+      "notes": "Depends on GIS-007. Need batch route to return segment data first."
     },
     {
-      "id": "US-010",
-      "title": "Results Download & Preview",
-      "description": "As a director, I want to preview and download generated files from the GIS app so that I can share them immediately.",
+      "id": "GIS-010",
+      "title": "Database schema for segment metadata persistence",
+      "description": "Store per-asset frame scores and segment metadata so composition can reuse ranking data without re-analyzing.",
       "acceptanceCriteria": [
-        "Preview available for images (thumbnail) and videos (first frame + play indicator)",
-        "Download button streams the file from Immich to the user's browser",
-        "File downloads with descriptive filename including event and output type",
-        "Mobile users see a note: 'Also available in your Immich app for mobile download'",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
+        "New table: VideoSegment with assetId, startTime, endTime, score, type",
+        "New table: FrameScore with assetId, timestamp, score, sceneIndex",
+        "Ranking API persists segments after analysis",
+        "Composition API queries persisted segments",
+        "Typecheck passes"
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "Implemented: GET /api/results/[id]/download serves files with proper Content-Type and Content-Disposition. Inline preview: <img> for images, <video controls> for videos. Part of US-009 commit bdde0f3."
-    },
-    {
-      "id": "US-011",
-      "title": "Feedback Loop — Positive & Negative Example Albums",
-      "description": "As a director, after reviewing a generated result, I want to mark source media as 'good' or 'not suitable' so that the system learns and improves future AI selections.",
-      "acceptanceCriteria": [
-        "After viewing a generated result, user can rate the source media used: thumbs-up (positive example) or thumbs-down (negative example)",
-        "Positive-rated media are copied to a hidden 'GIS Positive Examples' album in Immich",
-        "Negative-rated media are copied to a hidden 'GIS Negative Examples' album in Immich",
-        "Ratings are stored in the app's database linked to the media asset ID, event, generation job, and user feedback timestamp",
-        "Future vision analysis prompts can optionally reference positive/negative examples to improve ranking accuracy (feature-flagged for post-MVP)",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": "Implemented: POST /api/feedback stores POSITIVE/NEGATIVE ratings per sourceAssetId. MediaCard hover-reveals 👍/👎 buttons. Ratings persisted to FeedbackRating table. Loads existing feedback on page mount. Post-MVP: wire to vision prompt context. Committed as f034d19."
-    },
-    {
-      "id": "US-012",
-      "title": "AI Assistant Chat for Composition Guidance",
-      "description": "As a director, I want an AI chat assistant to help me craft better output requests and clarify options so that I get higher-quality marketing output.",
-      "acceptanceCriteria": [
-        "Chat panel available on the generation page",
-        "User can ask the assistant for help with output type recommendations, composition ideas, or media selection tips",
-        "Assistant has context of the current event, selected media count, and available output types",
-        "Assistant responses are streamed via Venice.ai text model",
-        "Chat history is session-scoped (not persisted)",
-        "Typecheck passes",
-        "Verify UI renders correctly in browser at expected route"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": "Implemented: src/lib/chat.ts with model-agnostic chat completion. System prompt: GIS composition expert with brand guidelines. POST /api/chat with event context. Floating 🤖 FAB button opens slide-up panel with message history and input. Supports Enter to send. Committed as 5b39519."
+      "passes": false,
+      "notes": "Optional optimization. Can start with in-memory passing from ranking to composition via API response."
     }
   ]
 }

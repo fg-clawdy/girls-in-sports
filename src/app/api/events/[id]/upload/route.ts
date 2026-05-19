@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { processVideoForScenes } from "@/lib/scene-detection-service";
 
 const IMMICH_URL = process.env.IMMICH_API_URL || "http://localhost:2283";
 const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
@@ -83,6 +84,14 @@ export async function POST(
         },
         body: JSON.stringify({ ids: uploadedAssetIds }),
       });
+
+      // Fire-and-forget: trigger scene detection for each uploaded video
+      // This runs async in the background so the user doesn't wait
+      for (const assetId of uploadedAssetIds) {
+        processVideoForScenes(assetId, params.id).catch((err) => {
+          console.warn(`Background scene detection failed for ${assetId}:`, err);
+        });
+      }
     }
 
     return NextResponse.json({

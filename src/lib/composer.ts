@@ -76,7 +76,7 @@ export interface VideoScript {
     backgroundColor: string;
     textColor: string;
   };
-  resolution: "1080p" | "720p" | "4K";
+  resolution: "1080p" | "720p" | "4K"; // 9:16 vertical default (1080x1920)
 }
 
 export type CompositionScript = CollageScript | VideoScript;
@@ -319,7 +319,7 @@ function generateFallbackScript(input: CompositionInput): CompositionScript {
           color: "#666666",
         },
       ],
-      dimensions: { width: 2400, height: 3200 },
+      dimensions: { width: 1080, height: 1920 }, // 9:16 vertical default
     };
   }
 
