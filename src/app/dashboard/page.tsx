@@ -11,6 +11,7 @@ interface EventItem {
   eventDate: string;
   description: string | null;
   immichAlbumId: string | null;
+  thumbnailUrl: string | null;
   createdAt: string;
 }
 
@@ -132,28 +133,39 @@ export default function DashboardPage() {
             <Link
               key={event.id}
               href={`/events/${event.id}`}
-              className="block bg-white rounded-lg border border-zinc-200 p-5 hover:shadow-md transition-shadow"
+              className="block bg-white rounded-lg border border-zinc-200 overflow-hidden hover:shadow-md transition-shadow"
             >
-              <div className="flex items-start justify-between">
-                <div>
-                  <h3 className="font-semibold text-zinc-900">{event.name}</h3>
-                  <p className="text-sm text-zinc-500 mt-1">
-                    {event.sport} &middot; {event.city} &middot;{" "}
-                    {new Date(event.eventDate).toLocaleDateString("en-US", {
-                      month: "long",
-                      day: "numeric",
-                      year: "numeric",
-                    })}
-                  </p>
-                  {event.description && (
-                    <p className="text-sm text-zinc-600 mt-2">{event.description}</p>
+              {event.thumbnailUrl && (
+                <div className="w-full h-40 bg-zinc-100 overflow-hidden relative">
+                  <img
+                    src={event.thumbnailUrl}
+                    alt={`${event.name} thumbnail`}
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+              )}
+              <div className="p-5">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h3 className="font-semibold text-zinc-900">{event.name}</h3>
+                    <p className="text-sm text-zinc-500 mt-1">
+                      {event.sport} &middot; {event.city} &middot;{" "}
+                      {new Date(event.eventDate).toLocaleDateString("en-US", {
+                        month: "long",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </p>
+                    {event.description && (
+                      <p className="text-sm text-zinc-600 mt-2">{event.description}</p>
+                    )}
+                  </div>
+                  {event.immichAlbumId && (
+                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 shrink-0">
+                      Immich
+                    </span>
                   )}
                 </div>
-                {event.immichAlbumId && (
-                  <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700">
-                    Immich
-                  </span>
-                )}
               </div>
             </Link>
           ))}

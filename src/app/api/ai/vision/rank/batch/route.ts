@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 import {
   analyzeMediaWithVision,
   fallbackRanking,
@@ -28,7 +29,7 @@ import {
 
 // Need these for route code
 const { spawn } = childProcess;
-const { mkdtemp, writeFile, readFile, unlink, rmdir } = fsPromises;
+const { mkdtemp, writeFile, readFile, unlink, rmdir, copyFile, mkdir } = fsPromises;
 const path = pathModule;
 const os = osModule;
 
@@ -102,6 +103,8 @@ export async function POST(request: Request) {
   // Track temp resources for cleanup
   const videoContexts: VideoAnalysisContext[] = [];
   const tempFiles: string[] = [];
+  // US-008: Track best-scored frame for thumbnail auto-select
+  let bestFrame: { assetId: string; timestamp: number; score: number; imagePath: string } | null = null;
 
   try {
     const body = await request.json();
@@ -319,6 +322,20 @@ export async function POST(request: Request) {
           const sceneData = sceneMap.get(item.sceneIndex)!;
           sceneData.scores.push(score.score);
           sceneData.reasons.push(...score.reasons);
+
+          // US-008: Track best-scored individual frame
+          if (score.score > (bestFrame?.score ?? 0)) {
+            const ctx = videoContexts.find((c) => c.assetId === item.assetId);
+            const frame = ctx?.extractedFrames.find((f) => f.timestamp === item.timestamp);
+            if (frame) {
+              bestFrame = {
+                assetId: item.assetId,
+                timestamp: item.timestamp,
+                score: score.score,
+                imagePath: frame.imagePath,
+              };
+            }
+          }
         }
 
         batchResults[batchIdx].status = "completed";
@@ -488,6 +505,24 @@ export async function POST(request: Request) {
     const topIds = finalScores.slice(0, 10).map((s) => s.assetId);
     const completedBatches = batchResults.filter((b) => b.status === "completed").length;
     const failedBatches = batchResults.filter((b) => b.status === "failed").length;
+
+    // US-008: Save best-scored frame as event thumbnail
+    if (bestFrame && eventId) {
+      try {
+        const thumbsDir = path.join(process.env.COMPOSITION_OUTPUT_DIR || "/tmp/gis-compositions", "thumbnails");
+        await mkdir(thumbsDir, { recursive: true });
+        const ext = path.extname(bestFrame.imagePath);
+        const dest = path.join(thumbsDir, `${eventId}_thumb${ext || ".jpg"}`);
+        await copyFile(bestFrame.imagePath, dest);
+        // Persist relative URL to event
+        await prisma.event.update({
+          where: { id: eventId },
+          data: { thumbnailUrl: `/thumbnails/${eventId}_thumb${ext || ".jpg"}` },
+        });
+      } catch (thumbErr) {
+        console.error("US-008: Failed to save thumbnail:", thumbErr);
+      }
+    }
 
     return NextResponse.json({
       success: true,

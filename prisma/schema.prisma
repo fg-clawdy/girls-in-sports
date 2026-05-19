@@ -15,6 +15,7 @@ model Event {
   eventDate   DateTime
   description String?
   immichAlbumId String? // References Immich album
+  thumbnailUrl  String? // Auto-selected best frame from vision ranking
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
