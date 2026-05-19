@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma } from "../prisma";
 import { JobType } from "@prisma/client";
 import { enqueueJob } from "../job-worker";
 

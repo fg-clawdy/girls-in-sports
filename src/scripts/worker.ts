@@ -13,6 +13,7 @@ import {
 import { handleIngestClip } from "../lib/handlers/ingest-clip";
 import { handleScoreClip } from "../lib/handlers/score-clip";
 import { handleDirectScript } from "../lib/handlers/direct-script";
+import { handleGenerateMusic } from "../lib/handlers/generate-music";
 
 const HEALTH_PORT = parseInt(process.env.WORKER_HEALTH_PORT || "3011", 10);
 
@@ -24,6 +25,9 @@ registerHandler(JobType.SCORE_CLIP, async ({ payload, jobId }) => {
 });
 registerHandler(JobType.DIRECT_SCRIPT, async ({ payload, jobId }) => {
   await handleDirectScript({ payload, jobId });
+});
+registerHandler(JobType.GENERATE_MUSIC, async ({ payload, jobId }) => {
+  await handleGenerateMusic({ payload, jobId });
 });
 
 setupGracefulShutdown();

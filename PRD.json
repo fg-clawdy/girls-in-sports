@@ -157,8 +157,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": "The reasoning model's thinking tokens are stripped from the response (`strip_thinking_response: true`) — we only want the clean JSON output. Prompt caching should be applied to the static system portion for repeated calls."
+      "passes": true,
+      "notes": "Implemented 2026-05-19. handleDirectScript in src/lib/handlers/direct-script.ts: assembles director prompt with event context, creative brief, energy preset, clip manifest, must-includes; calls Venice reasoning model (qwen-qwq-32b) with reasoning_effort=high, strip_thinking_response=true, json_schema response_format; validates must-include presence, timestamp bounds, total duration ±10%; retries up to 2x with corrective prompt; persists scriptJson, sets Campaign.status=SCRIPTED; enqueues parallel GENERATE_MUSIC + RENDER_PROXY. Wired into worker.ts. Commit: fdc5631."
     },
     {
       "id": "US-009",
