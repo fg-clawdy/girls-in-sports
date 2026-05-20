@@ -1,67 +1,98 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { jwtVerify } from "jose";
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "gis-local-secret-change-me"
-);
+// Simple in-memory token bucket rate limiter
+interface Bucket {
+  tokens: number;
+  lastRefill: number;
+}
 
-const SESSION_MAX_AGE = 30 * 24 * 60 * 60; // 30 days in seconds
+const buckets = new Map<string, Bucket>();
+const CLEANUP_INTERVAL_MS = 60000;
+
+// Default limits
+const DEFAULT_RATE = 60; // requests per minute
+const UPLOAD_RATE = 10;  // requests per minute for upload routes
+
+function getRateLimit(path: string): number {
+  if (path.includes("/upload")) return UPLOAD_RATE;
+  return DEFAULT_RATE;
+}
+
+function getBucketKey(req: NextRequest): string {
+  const forwarded = req.headers.get("x-forwarded-for");
+  const ip = forwarded?.split(",")[0]?.trim() || req.ip || "unknown";
+  return `${ip}:${req.nextUrl.pathname}`;
+}
+
+function isAllowed(key: string, rate: number): boolean {
+  const now = Date.now();
+  let bucket = buckets.get(key);
+
+  if (!bucket) {
+    bucket = { tokens: rate, lastRefill: now };
+    buckets.set(key, bucket);
+  }
+
+  // Refill tokens
+  const elapsed = (now - bucket.lastRefill) / 1000; // seconds
+  const refill = Math.floor(elapsed * (rate / 60)); // tokens per second
+  bucket.tokens = Math.min(rate, bucket.tokens + refill);
+  bucket.lastRefill = now;
+
+  if (bucket.tokens >= 1) {
+    bucket.tokens -= 1;
+    return true;
+  }
+
+  return false;
+}
+
+// Periodic cleanup to prevent memory growth
+if (typeof globalThis !== "undefined") {
+  setInterval(() => {
+    const now = Date.now();
+    const entries = Array.from(buckets.entries());
+    for (const [key, bucket] of entries) {
+      if (now - bucket.lastRefill > CLEANUP_INTERVAL_MS * 5) {
+        buckets.delete(key);
+      }
+    }
+  }, CLEANUP_INTERVAL_MS);
+}
 
 export function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl;
-
-  // Public routes - no auth required
-  if (pathname === "/login" || pathname.startsWith("/api/auth")) {
+  // Skip rate limiting for non-API routes and static files
+  const path = request.nextUrl.pathname;
+  if (!path.startsWith("/api/")) {
     return NextResponse.next();
   }
 
-  // Check auth token
-  const token = request.cookies.get("gis_auth_token")?.value;
-  let isValid = false;
-
-  if (token) {
-    try {
-      jwtVerify(token, JWT_SECRET);
-      isValid = true;
-    } catch {
-      isValid = false;
-    }
+  // Skip health checks
+  if (path === "/api/health") {
+    return NextResponse.next();
   }
 
-  // Protect all other routes
-  if (!isValid) {
-    // For API routes, return 401 JSON instead of redirecting to login page
-    if (pathname.startsWith("/api/")) {
-      return NextResponse.json(
-        { error: "Unauthorized — please log in again" },
-        { status: 401 }
-      );
-    }
-    return NextResponse.redirect(new URL("/login", request.url));
+  const rate = getRateLimit(path);
+  const key = getBucketKey(request);
+
+  if (!isAllowed(key, rate)) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded. Please slow down." },
+      { status: 429, headers: { "Retry-After": "60" } }
+    );
   }
 
-  // Refresh cookie on each authenticated request
+  // Security headers
   const response = NextResponse.next();
-  response.cookies.set("gis_auth_token", token!, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: SESSION_MAX_AGE,
-    path: "/",
-  });
-
-  // Prevent caching of authenticated pages
-  response.headers.set(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, proxy-revalidate"
-  );
-  response.headers.set("Pragma", "no-cache");
-  response.headers.set("Expires", "0");
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  response.headers.set("X-Frame-Options", "DENY");
+  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  response.headers.set("X-DNS-Prefetch-Control", "off");
 
   return response;
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/api/:path*"],
 };

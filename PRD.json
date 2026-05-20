@@ -283,8 +283,8 @@
         "Typecheck passes"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": "The GIS DB is the source of truth for tag queries. Immich is the display layer. Never query Immich for tag-based filtering — always query the AssetTag table."
+      "passes": true,
+      "notes": "Implemented 2026-05-20. syncTagsToImmich() in immich.ts: fetches existing description, preserves non-gis lines, appends gis: prefixed tags, writes via PUT /api/assets. searchAssetsByTag() queries GIS AssetTag table with AND-logic, optional eventId scope — never queries Immich for tag filtering. syncTagsFromImmich() parses gis: prefixed tags from Immich descriptions and upserts into AssetTag with source=IMMICH_CLIP. smartSearchImmich() proxies Immich CLIP smart search POST /api/search/smart and resolves immichAssetIds back to GIS Asset records. POST /api/assets/[id]/tags for add/remove with immediate sync. POST /api/events/[id]/sync-tags for one-shot pull. POST /api/search/smart for CLIP proxy. score-clip.ts already writes gis: prefixed descriptions + AssetTag records. Commit: 5eba373."
     },
     {
       "id": "US-016",
