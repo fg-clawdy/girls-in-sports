@@ -4,7 +4,7 @@ import { enqueueJob } from "../job-worker";
 
 const VENICE_URL = process.env.VENICE_API_URL || "https://api.venice.ai/api/v1";
 const VENICE_KEY = process.env.VENICE_API_KEY || "";
-const DIRECTOR_MODEL = process.env.DIRECTOR_MODEL || "qwen-qwq-32b";
+const DIRECTOR_MODEL = process.env.DIRECTOR_MODEL || "deepseek-v4-pro";
 
 const TARGET_DURATION_MS: Record<string, number> = {
   REEL_15: 15000,
@@ -286,6 +286,7 @@ Generate the ProductionScript JSON now.`;
       "Content-Type": "application/json",
       Authorization: `Bearer ${VENICE_KEY}`,
     },
+    signal: AbortSignal.timeout(120000),
     body: JSON.stringify({
       model: DIRECTOR_MODEL,
       messages: [

@@ -6,7 +6,8 @@ let _prisma: PrismaClient | null = null;
 
 export function getPrisma(): PrismaClient {
   if (!_prisma) {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const dbUrl = process.env.DATABASE_URL || "postgresql://sensei:dojomojo@localhost:5432/girlsinsports";
+    const pool = new Pool({ connectionString: dbUrl });
     const adapter = new PrismaPg(pool);
     _prisma = new PrismaClient({ adapter });
   }

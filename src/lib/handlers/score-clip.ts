@@ -1,14 +1,9 @@
 import { PrismaClient, AssetStatus, AssetTagSource, ClipType } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
-import { Pool } from "pg";
 import { spawn } from "child_process";
 import { promises as fs, readFileSync } from "fs";
 import { join } from "path";
+import { prisma } from "../prisma";
 import { downloadAssetToFile, updateAssetDescription } from "../immich";
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 interface ScoreClipPayload {
   assetId: string;
