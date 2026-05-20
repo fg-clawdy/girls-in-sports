@@ -189,10 +189,27 @@ model Campaign {
   createdAt      DateTime       @default(now())
 
   campaignClips  CampaignClip[]
+  campaignFeedbacks CampaignFeedback[]
 
   @@index([eventId])
   @@index([status])
   @@map("campaigns")
+}
+
+model CampaignFeedback {
+  id               String   @id @default(cuid())
+  campaignId       String
+  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  productionWorthy Boolean
+  overallRating    Int      // 1–5
+  wouldChange      String?  @db.Text
+  clipSentiments   Json?    // { assetId: string; sentiment: string }[]
+  musicSatisfied   Boolean?
+  createdAt        DateTime @default(now())
+
+  @@index([campaignId])
+  @@index([createdAt])
+  @@map("campaign_feedbacks")
 }
 
 model CampaignClip {

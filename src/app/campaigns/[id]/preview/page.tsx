@@ -15,6 +15,7 @@ interface CampaignData {
   musicUrl: string | null;
   userFeedbackJson: any;
   event: {
+    id: string;
     name: string;
     sport: string;
     city: string;
@@ -146,9 +147,10 @@ export default function PreviewPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "start-over" }),
       });
-      router.push(`/events/${campaign?.event ? "" : ""}`); // navigate handled below
-      if (campaign) {
-        router.push(`/events/${campaign.event ? "unknown" : ""}`);
+      if (campaign?.event?.id) {
+        router.push(`/events/${campaign.event.id}/curate`);
+      } else {
+        router.push("/events");
       }
     } catch {
       setError("Failed to reset");

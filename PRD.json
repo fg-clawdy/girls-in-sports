@@ -231,8 +231,8 @@
         "Typecheck passes"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": "The Topaz upscale runs only on source clips that are sub-720p. For typical modern phone footage (1080p+), this step is skipped entirely, keeping cost and time low."
+      "passes": true,
+      "notes": "Implemented 2026-05-19. handleRenderFinal in src/lib/handlers/render-final.ts: optional Topaz 2x upscale for sub-720p clips via Venice /video/enhance, stream-copy cuts with 150ms margin, concat demuxer, 1080x1920 vertical scale with pad (never stretch), per-clip text overlays via drawtext with enable between timestamps, music mix with -12dB original + 0dB music + loudnorm -14 LUFS, libx264 CRF 18 slow high profile level 4.0 yuv420p, ffprobe h264 validation, uploads to Immich as FINAL, updates Campaign.status=DONE. Wired into worker.ts. Commit: 858df26."
     },
     {
       "id": "US-013",
