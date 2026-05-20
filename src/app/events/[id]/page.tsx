@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 
+// ── Types ────────────────────────────────────────────────────────────
+
 interface EventData {
   id: string;
   name: string;
@@ -12,15 +14,6 @@ interface EventData {
   eventDate: string;
   description: string | null;
   immichAlbumId: string | null;
-  generatedAssets: Array<{
-    id: string;
-    outputType: string;
-    fileName: string;
-    fileSize: number;
-    status: string;
-    createdAt: string;
-    immichAssetId: string | null;
-  }>;
 }
 
 interface ImmichAsset {
@@ -28,7 +21,7 @@ interface ImmichAsset {
   type: string;
   originalFileName: string;
   fileCreatedAt: string;
-  duration?: string; // ISO 8601 duration for videos, e.g. "PT00H00M05S"
+  duration?: string;
   exifInfo?: {
     city?: string;
     description?: string;
@@ -42,111 +35,170 @@ interface ImmichAlbum {
   assets: ImmichAsset[];
 }
 
-type OutputType = "collage" | "highlight" | "wrapup";
+interface ClipData {
+  id: string;
+  immichAssetId: string | null;
+  durationSeconds: number | null;
+  type: string;
+  status: string;
+  clipScore: {
+    compositeScore: number | null;
+    clipType: string | null;
+    visionScore: number | null;
+    audioScore: number | null;
+    motionScore: number | null;
+    transcriptExcerpt: string | null;
+  } | null;
+  assetTags: Array<{ tag: string; source: string; confidence: number | null }>;
+}
+
+interface JobItem {
+  id: string;
+  type: string;
+  status: string;
+  attempts: number;
+  maxAttempts: number;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  retryAfter: string | null;
+  parentJobId: string | null;
+}
+
+// ── Constants ────────────────────────────────────────────────────────
+
+const FORMAT_OPTIONS: { value: string; label: string; duration: number }[] = [
+  { value: "REEL_15", label: "15s Reel", duration: 15 },
+  { value: "REEL_30", label: "30s Reel", duration: 30 },
+  { value: "REEL_60", label: "60s Reel", duration: 60 },
+  { value: "AD_15", label: "15s Ad", duration: 15 },
+  { value: "AD_30", label: "30s Ad", duration: 30 },
+  { value: "HIGHLIGHT_60", label: "60s Highlight", duration: 60 },
+];
+
+const ENERGY_OPTIONS: { value: string; label: string }[] = [
+  { value: "HYPE", label: "Hype" },
+  { value: "INSPIRATIONAL", label: "Inspirational" },
+  { value: "EMOTIONAL", label: "Emotional" },
+  { value: "INSTRUCTIONAL", label: "Instructional" },
+];
+
+const SPORT_BRIEF_EXAMPLES: Record<string, string> = {
+  basketball: "Focus on fast breaks and player reactions. High intensity.",
+  soccer: "Show team chemistry and goal celebrations. Emotional arc.",
+  volleyball: "Spikes and digs. Emphasize athleticism and hustle.",
+  default: "Highlight key moments, energy, and team spirit.",
+};
+
+const JOB_TYPE_LABELS: Record<string, string> = {
+  INGEST_CLIP: "Scene Detection",
+  SCORE_CLIP: "AI Scoring",
+  DIRECT_SCRIPT: "Script Generation",
+  GENERATE_MUSIC: "Music Generation",
+  RENDER_PROXY: "Proxy Render",
+  RENDER_FINAL: "Final Render",
+};
+
+const POLL_INTERVAL = 5000;
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+function scoreBadgeColor(score: number | null) {
+  if (score === null || score === undefined) return "bg-zinc-200 text-zinc-500";
+  if (score >= 70) return "bg-emerald-100 text-emerald-700 border-emerald-300";
+  if (score >= 40) return "bg-amber-100 text-amber-700 border-amber-300";
+  return "bg-red-100 text-red-700 border-red-300";
+}
+
+function getStatusBadge(status: string) {
+  switch (status) {
+    case "QUEUED":
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-zinc-100 text-zinc-600">Queued</span>;
+    case "RUNNING":
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700">
+          <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+          Running
+        </span>
+      );
+    case "RETRYING":
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700">Retrying</span>;
+    case "DONE":
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-50 text-emerald-700">Done</span>;
+    case "FAILED":
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-50 text-red-700">Failed</span>;
+    default:
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-zinc-100 text-zinc-600">{status}</span>;
+  }
+}
+
+function formatDuration(startedAt: string | null) {
+  if (!startedAt) return "—";
+  const diff = Date.now() - new Date(startedAt).getTime();
+  const mins = Math.floor(diff / 60000);
+  const secs = Math.floor((diff % 60000) / 1000);
+  return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+}
+
+// ── Component ────────────────────────────────────────────────────────
 
 export default function EventPage() {
   const { id } = useParams();
+  const eventId = Array.isArray(id) ? id[0] : id;
+
+  // ── Event & Album ──
   const [event, setEvent] = useState<EventData | null>(null);
   const [album, setAlbum] = useState<ImmichAlbum | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState<"all" | "image" | "video">("all");
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [selectionMode, setSelectionMode] = useState(false);
-  const [showOutputPanel, setShowOutputPanel] = useState(false);
-  const [outputType, setOutputType] = useState<OutputType | null>(null);
-  const [letAiChoose, setLetAiChoose] = useState(false);
-  const [localOnly, setLocalOnly] = useState(false);
-  const [ranking, setRanking] = useState<{
-    scores: Array<{
-      assetId: string;
-      score: number;
-      rank: number;
-      reasons: string[];
-      framesAnalyzed?: number;
-      weighting?: string;
-      audioScore?: number;
-      transcriptPreview?: string;
-      keywordHits?: string[];
-      segments?: Array<{
-        startTime: number;
-        endTime: number;
-        duration: number;
-        estimatedType: string;
-        score: number;
-        reasons: string[];
-      }>;
-    }>;
-    topIds: string[];
-    modelUsed: string;
-    visionConfigured: boolean;
-    error?: string;
-    isSpendLimit?: boolean;
-  } | null>(null);
-  const [rankingLoading, setRankingLoading] = useState(false);
-  const [rankingProgress, setRankingProgress] = useState<{
-    totalBatches: number;
-    completedBatches: number;
-    failedBatches: number;
-    currentBatch: number;
-    status: string;
-  } | null>(null);
-  const [showRankingPanel, setShowRankingPanel] = useState(false);
-  const [compositionScript, setCompositionScript] = useState<any>(null);
-  const [compositionLoading, setCompositionLoading] = useState(false);
-  const [showScriptPanel, setShowScriptPanel] = useState(false);
-  const [showIntentPanel, setShowIntentPanel] = useState(false);
-  const [userIntent, setUserIntent] = useState("");
-  const [scriptJsonText, setScriptJsonText] = useState("");
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, "POSITIVE" | "NEGATIVE">>({});
-  const [chatOpen, setChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
-    { role: "assistant", content: "Hi! I'm your composition assistant. Ask me anything about creating great sports content!" },
-  ]);
-  const [chatInput, setChatInput] = useState("");
-  const [chatLoading, setChatLoading] = useState(false);
 
-  // Upload state
+  // ── Upload ──
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [uploadErrors, setUploadErrors] = useState<string[]>([]);
+  const [showUploadToast, setShowUploadToast] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Quality flags by assetId
-  const [qualityFlags, setQualityFlags] = useState<Record<string, string[]>>({});
-  // Scene segments grouped by parent video assetId
-  const [sceneSegments, setSceneSegments] = useState<
-    Record<string, { id: string; startTime: number; endTime: number; motionScore: number }[]>
-  >({});
-  // Which parent videos have their scene segments expanded
-  const [expandedScenes, setExpandedScenes] = useState<Set<string>>(new Set());
-  // Duplicate-content warning modal
-  const [showDuplicateWarning, setShowDuplicateWarning] = useState(false);
-  // Upload toast notification
-  const [showUploadToast, setShowUploadToast] = useState(false);
+  // ── Curate ──
+  const [clips, setClips] = useState<ClipData[]>([]);
+  const [clipsLoading, setClipsLoading] = useState(true);
+  const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState("");
+  const [acceptedMap, setAcceptedMap] = useState<Record<string, boolean>>({});
+  const [mustIncludeMap, setMustIncludeMap] = useState<Record<string, boolean>>({});
+  const [sortBy, setSortBy] = useState<"score" | "duration" | "type">("score");
+  const [brief, setBrief] = useState("");
+  const [targetFormat, setTargetFormat] = useState("");
+  const [energyPreset, setEnergyPreset] = useState("HYPE");
+  const [creating, setCreating] = useState(false);
 
-  useEffect(() => {
-    if (!showUploadToast) return;
-    const timer = setTimeout(() => setShowUploadToast(false), 6000);
-    return () => clearTimeout(timer);
-  }, [showUploadToast]);
+  // ── Active Jobs ──
+  const [jobs, setJobs] = useState<JobItem[]>([]);
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
 
-  // Lightbox state
+  // ── All Media (collapsed by default) ──
+  const [showAllMedia, setShowAllMedia] = useState(false);
+  const [mediaFilter, setMediaFilter] = useState<"all" | "image" | "video">("all");
+
+  // ── Lightbox ──
   const [lightboxAsset, setLightboxAsset] = useState<ImmichAsset | null>(null);
 
-  // Edit event modal
+  // ── Edit Event Modal ──
   const [showEditModal, setShowEditModal] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "" });
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState("");
 
-  // Delete confirmation
+  // ── Delete Asset ──
   const [deleteTarget, setDeleteTarget] = useState<{ assetId: string; fileName: string } | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
 
+  // ── Data fetching ──
+
   const fetchEventData = useCallback(async () => {
     try {
-      const eventRes = await fetch(`/api/events/${id}`);
+      const eventRes = await fetch(`/api/events/${eventId}`);
       if (!eventRes.ok) throw new Error("Failed to load event");
       const eventData = await eventRes.json();
       setEvent(eventData.event);
@@ -158,125 +210,69 @@ export default function EventPage() {
           setAlbum(albumData.album);
         }
       }
-
-      // Load existing feedback
-      const fbRes = await fetch(`/api/feedback?eventId=${id}`);
-      if (fbRes.ok) {
-        const fbData = await fbRes.json();
-        const map: Record<string, "POSITIVE" | "NEGATIVE"> = {};
-        fbData.feedback.forEach((f: any) => {
-          map[f.sourceAssetId] = f.rating;
-        });
-        setFeedbackMap(map);
-      }
-
-      // Load quality flags (US-004)
-      const qfRes = await fetch(`/api/events/${id}/quality-flags`);
-      if (qfRes.ok) {
-        const qfData = await qfRes.json();
-        const map: Record<string, string[]> = {};
-        qfData.flags.forEach((f: any) => {
-          map[f.assetId] = f.flags;
-        });
-        setQualityFlags(map);
-      }
-
-      // Load scene segments (US-003)
-      const segRes = await fetch(`/api/events/${id}/scene-segments`);
-      if (segRes.ok) {
-        const segData = await segRes.json();
-        setSceneSegments(segData.segments || {});
-      }
     } catch {
       setError("Failed to load event data");
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [eventId]);
+
+  const fetchClips = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/events/${eventId}/clips`);
+      if (!res.ok) throw new Error("Failed to load clips");
+      const data = await res.json();
+      setClips(data.clips || []);
+      // Default accept all with score >= 50
+      const map: Record<string, boolean> = {};
+      data.clips.forEach((c: ClipData) => {
+        map[c.id] = (c.clipScore?.compositeScore ?? 0) >= 50;
+      });
+      setAcceptedMap(map);
+    } catch {
+      // clips may not exist yet — that's ok
+      setClips([]);
+    } finally {
+      setClipsLoading(false);
+    }
+  }, [eventId]);
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/events/${eventId}/jobs`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setJobs(data.jobs || []);
+    } catch {
+      // silently fail — jobs are enhancement
+    }
+  }, [eventId]);
 
   useEffect(() => {
     fetchEventData();
-  }, [fetchEventData]);
+    fetchClips();
+    fetchJobs();
+  }, [fetchEventData, fetchClips, fetchJobs]);
 
-  const filteredAssets = album?.assets.filter((asset) => {
-    if (filter === "all") return true;
-    return asset.type.toLowerCase() === filter;
-  }) || [];
+  // Auto-poll jobs every 5s when there are active jobs
+  const hasActiveJobs = jobs.some((j) => j.status === "QUEUED" || j.status === "RUNNING" || j.status === "RETRYING");
+  useEffect(() => {
+    if (!hasActiveJobs) return;
+    const interval = setInterval(() => {
+      fetchJobs();
+      fetchClips(); // also refresh clips as jobs complete
+    }, POLL_INTERVAL);
+    return () => clearInterval(interval);
+  }, [hasActiveJobs, fetchJobs, fetchClips]);
 
-  const toggleSelection = (assetId: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(assetId)) {
-        next.delete(assetId);
-      } else {
-        next.add(assetId);
-      }
-      return next;
-    });
-  };
+  // Upload toast timer
+  useEffect(() => {
+    if (!showUploadToast) return;
+    const timer = setTimeout(() => setShowUploadToast(false), 6000);
+    return () => clearTimeout(timer);
+  }, [showUploadToast]);
 
-  const selectAll = () => {
-    // US-005: Exclude full videos that have detected scenes; include scene segments, images, and videos without scenes
-    const ids: string[] = [];
-    for (const asset of filteredAssets) {
-      if (asset.type !== "VIDEO") {
-        ids.push(asset.id); // Images always included
-      } else {
-        const hasScenes = sceneSegments[asset.id] && sceneSegments[asset.id].length > 0;
-        if (!hasScenes) {
-          ids.push(asset.id); // Videos WITHOUT scenes included
-        }
-        // If video HAS scenes, skip the full video but add its scene segments below
-      }
-    }
-    // Include all scene segment IDs
-    for (const segments of Object.values(sceneSegments)) {
-      for (const seg of segments) {
-        ids.push(seg.id);
-      }
-    }
-    setSelectedIds(new Set(ids));
-  };
-
-  const deselectAll = () => {
-    setSelectedIds(new Set());
-  };
-
-  const isAllSelected = filteredAssets.length > 0 && filteredAssets.every((a) => selectedIds.has(a.id));
-
-  const enterSelectionMode = async () => {
-    setSelectionMode(true);
-    setSelectedIds(new Set());
-    // Load quality flags and scene segments for this event
-    try {
-      const [qfRes, segRes] = await Promise.all([
-        fetch(`/api/events/${id}/quality-flags`),
-        fetch(`/api/events/${id}/scene-segments`),
-      ]);
-      if (qfRes.ok) {
-        const qfData = await qfRes.json();
-        const map: Record<string, string[]> = {};
-        qfData.flags.forEach((f: any) => {
-          map[f.assetId] = f.flags;
-        });
-        setQualityFlags(map);
-      }
-      if (segRes.ok) {
-        const segData = await segRes.json();
-        setSceneSegments(segData.segments || {});
-      }
-    } catch {
-      // Silently fail — flags and scenes are enhancement, not required
-    }
-  };
-
-  const exitSelectionMode = () => {
-    setSelectionMode(false);
-    setSelectedIds(new Set());
-    setShowOutputPanel(false);
-    setOutputType(null);
-    setLetAiChoose(false);
-  };
+  // ── Upload handlers ──
 
   const handleUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -306,19 +302,17 @@ export default function EventPage() {
                   reject(new Error(`${file.name}: ${xhr.statusText || "Upload failed"}`));
                 }
               });
-              xhr.addEventListener("error", () => {
-                reject(new Error(`${file.name}: Network error`));
-              });
-              xhr.addEventListener("abort", () => {
-                reject(new Error(`${file.name}: Aborted`));
-              });
-              xhr.open("POST", `/api/events/${id}/upload`);
+              xhr.addEventListener("error", () => reject(new Error(`${file.name}: Network error`)));
+              xhr.addEventListener("abort", () => reject(new Error(`${file.name}: Aborted`)));
+              xhr.open("POST", `/api/events/${eventId}/upload`);
               xhr.send(formData);
             })
         )
       );
       setShowUploadToast(true);
       await fetchEventData();
+      await fetchClips();
+      await fetchJobs();
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Upload error";
@@ -337,7 +331,116 @@ export default function EventPage() {
     e.preventDefault();
   };
 
+  // ── Curate actions ──
+
+  const allTags = Array.from(new Set(clips.flatMap((c) => c.assetTags.map((t) => t.tag)))).sort();
+
+  const filteredClips = clips.filter((clip) => {
+    if (selectedTags.size > 0) {
+      const clipTags = new Set(clip.assetTags.map((t) => t.tag));
+      for (const tag of selectedTags) {
+        if (!clipTags.has(tag)) return false;
+      }
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const inTags = clip.assetTags.some((t) => t.tag.toLowerCase().includes(q));
+      const inTranscript = (clip.clipScore?.transcriptExcerpt ?? "").toLowerCase().includes(q);
+      if (!inTags && !inTranscript) return false;
+    }
+    return true;
+  });
+
+  const sortedClips = [...filteredClips].sort((a, b) => {
+    if (sortBy === "score") {
+      return (b.clipScore?.compositeScore ?? 0) - (a.clipScore?.compositeScore ?? 0);
+    }
+    if (sortBy === "duration") {
+      return (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0);
+    }
+    return (a.clipScore?.clipType ?? "").localeCompare(b.clipScore?.clipType ?? "");
+  });
+
+  const acceptedCount = sortedClips.filter((c) => acceptedMap[c.id]).length;
+  const mustIncludeIds = sortedClips.filter((c) => mustIncludeMap[c.id]).map((c) => c.id);
+
+  const toggleTag = (tag: string) => {
+    setSelectedTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return next;
+    });
+  };
+
+  const toggleAccept = (clipId: string) => {
+    setAcceptedMap((prev) => ({ ...prev, [clipId]: !prev[clipId] }));
+  };
+
+  const toggleMustInclude = (clipId: string) => {
+    setMustIncludeMap((prev) => ({ ...prev, [clipId]: !prev[clipId] }));
+  };
+
+  const selectAllAccepted = () => {
+    const map: Record<string, boolean> = {};
+    sortedClips.forEach((c) => (map[c.id] = true));
+    setAcceptedMap((prev) => ({ ...prev, ...map }));
+  };
+
+  const createCampaign = async () => {
+    if (!targetFormat) return;
+    setCreating(true);
+    try {
+      const res = await fetch(`/api/events/${eventId}/campaigns`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          brief: brief.trim(),
+          targetFormat,
+          energyPreset,
+          selectedAssetIds: sortedClips.filter((c) => acceptedMap[c.id]).map((c) => c.id),
+          mustIncludeAssetIds: mustIncludeIds,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to create campaign");
+      const data = await res.json();
+      window.location.href = `/campaigns/${data.campaign.id}/preview`;
+    } catch {
+      setError("Failed to create campaign");
+      setCreating(false);
+    }
+  };
+
+  // ── Active Jobs actions ──
+
+  const handleRetryJob = async (jobId: string) => {
+    setRetryingJobId(jobId);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/retry`, { method: "POST" });
+      if (!res.ok) throw new Error("Retry failed");
+      await fetchJobs();
+    } catch {
+      setError("Failed to retry job");
+    } finally {
+      setRetryingJobId(null);
+    }
+  };
+
   // ── Edit Event ──
+
+  const openEditModal = () => {
+    if (!event) return;
+    setEditForm({
+      name: event.name,
+      sport: event.sport,
+      city: event.city,
+      eventDate: event.eventDate ? new Date(event.eventDate).toISOString().split("T")[0] : "",
+      description: event.description || "",
+    });
+    setEditError("");
+    setShowEditModal(true);
+  };
+
   const handleEditEvent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!event) return;
@@ -367,25 +470,13 @@ export default function EventPage() {
     }
   };
 
-  const openEditModal = () => {
-    if (!event) return;
-    setEditForm({
-      name: event.name,
-      sport: event.sport,
-      city: event.city,
-      eventDate: event.eventDate ? new Date(event.eventDate).toISOString().split("T")[0] : "",
-      description: event.description || "",
-    });
-    setEditError("");
-    setShowEditModal(true);
-  };
-
   // ── Delete Asset ──
+
   const handleDeleteAsset = async () => {
     if (!deleteTarget) return;
     setDeleteLoading(true);
     try {
-      const res = await fetch(`/api/events/${id}/assets/${deleteTarget.assetId}`, {
+      const res = await fetch(`/api/events/${eventId}/assets/${deleteTarget.assetId}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error("Delete failed");
@@ -398,133 +489,14 @@ export default function EventPage() {
     }
   };
 
-  // US-006: Check if any selected full video overlaps with selected scene segments
-  const checkForDuplicateScenes = (): boolean => {
-    for (const parentId of Object.keys(sceneSegments)) {
-      if (!selectedIds.has(parentId)) continue; // Parent not selected
-      const segments = sceneSegments[parentId];
-      for (const seg of segments) {
-        if (selectedIds.has(seg.id)) {
-          return true; // Overlap: both parent and its scene selected
-        }
-      }
-    }
-    return false;
-  };
+  // ── Filtered media ──
 
-  const handleCompose = async () => {
+  const filteredAssets = album?.assets.filter((asset) => {
+    if (mediaFilter === "all") return true;
+    return asset.type.toLowerCase() === mediaFilter;
+  }) || [];
 
-    setRankingLoading(true);
-    setShowRankingPanel(true);
-    setRankingProgress(null);
-
-    try {
-      const idsToRank = letAiChoose
-        ? filteredAssets.map((a) => a.id)
-        : Array.from(selectedIds);
-
-      // Build asset types + durations map
-      const assetTypes: Record<string, "IMAGE" | "VIDEO"> = {};
-      const assetDurations: Record<string, number> = {};
-      for (const asset of filteredAssets) {
-        assetTypes[asset.id] = asset.type === "VIDEO" ? "VIDEO" : "IMAGE";
-        // Parse ISO 8601 duration like "PT00H00M05S" or simple "00:00:05"
-        const durStr = (asset.duration || "").toString();
-        if (durStr) {
-          // Try PT format first
-          const ptMatch = durStr.match(/PT(\d+H)?(\d+M)?([\d.]+S)?/);
-          if (ptMatch) {
-            const hours = parseInt(ptMatch[1] || "0H");
-            const mins = parseInt(ptMatch[2] || "0M");
-            const secs = parseFloat(ptMatch[3] || "0S");
-            assetDurations[asset.id] = hours * 3600 + mins * 60 + secs;
-          } else {
-            // Try HH:MM:SS format
-            const parts = durStr.split(":").map(Number);
-            if (parts.length === 3) {
-              assetDurations[asset.id] = parts[0] * 3600 + parts[1] * 60 + parts[2];
-            } else if (parts.length === 2) {
-              assetDurations[asset.id] = parts[0] * 60 + parts[1];
-            }
-          }
-        }
-      }
-
-      // Show initial progress
-      const totalItems = idsToRank.length;
-      const estimatedBatches = Math.ceil(totalItems / 3);
-      setRankingProgress({
-        totalBatches: estimatedBatches,
-        completedBatches: 0,
-        failedBatches: 0,
-        currentBatch: 0,
-        status: `Preparing to analyze ${totalItems} media items in ${estimatedBatches} batches...`,
-      });
-
-      const res = await fetch("/api/ai/vision/rank/batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          assetIds: idsToRank,
-          assetTypes,
-          assetDurations,
-          eventId: id,
-          localOnly,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (data.success) {
-        setRanking(data);
-        setRankingProgress({
-          totalBatches: data.totalBatches,
-          completedBatches: data.completedBatches,
-          failedBatches: data.failedBatches || 0,
-          currentBatch: data.totalBatches,
-          status: `Analysis complete! ${data.totalAssetsAnalyzed} items scored across ${data.completedBatches}/${data.totalBatches} batches.`,
-        });
-        // Pre-select top-ranked assets
-        if (data.topIds?.length > 0) {
-          setSelectedIds(new Set(data.topIds));
-        }
-      } else {
-        // Server returned an error response
-        setRanking({
-          scores: data.scores || [],
-          topIds: data.topIds || idsToRank.slice(0, 10),
-          modelUsed: data.modelUsed || "error-fallback",
-          visionConfigured: data.visionConfigured ?? false,
-          error: data.error,
-          isSpendLimit: data.isSpendLimit,
-        });
-        setRankingProgress({
-          totalBatches: data.totalBatches || 0,
-          completedBatches: data.completedBatches || 0,
-          failedBatches: data.failedBatches || 0,
-          currentBatch: data.totalBatches || 0,
-          status: data.error || "Analysis failed",
-        });
-      }
-    } catch (err: any) {
-      setRanking({
-        scores: [],
-        topIds: Array.from(selectedIds).slice(0, 10),
-        modelUsed: "error-fallback",
-        visionConfigured: true,
-        error: err.message || "Network error — please retry",
-      });
-      setRankingProgress({
-        totalBatches: 0,
-        completedBatches: 0,
-        failedBatches: 0,
-        currentBatch: 0,
-        status: err.message || "Network error — please retry",
-      });
-    } finally {
-      setRankingLoading(false);
-    }
-  };
+  // ── Render ──
 
   if (loading) {
     return (
@@ -543,15 +515,12 @@ export default function EventPage() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50 pb-28" onDrop={handleDrop} onDragOver={handleDragOver}>
-      {/* Header */}
+    <div className="min-h-screen bg-zinc-50 pb-20" onDrop={handleDrop} onDragOver={handleDragOver}>
+      {/* ── Header ── */}
       <header className="bg-white border-b border-zinc-200 px-6 py-4">
         <div className="max-w-6xl mx-auto">
-          <Link
-            href="/dashboard"
-            className="text-sm text-zinc-500 hover:text-zinc-900 mb-2 inline-block"
-          >
-            &larr; Back to Events
+          <Link href="/dashboard" className="text-sm text-zinc-500 hover:text-zinc-900 mb-2 inline-block">
+            &larr; Back to Dashboard
           </Link>
           <div className="flex items-center justify-between">
             <h1 className="text-2xl font-bold text-zinc-900">{event.name}</h1>
@@ -570,1012 +539,546 @@ export default function EventPage() {
               {event.city}
             </span>
             <span>
-              {new Date(event.eventDate).toLocaleDateString("en-US", {
-                month: "long",
-                day: "numeric",
-                year: "numeric",
-              })}
+              {new Date(event.eventDate).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
             </span>
           </div>
-          {event.description && (
-            <p className="text-zinc-600 mt-2">{event.description}</p>
-          )}
+          {event.description && <p className="text-zinc-600 mt-2">{event.description}</p>}
         </div>
       </header>
 
-      {/* Content */}
-      <main className="max-w-6xl mx-auto px-6 py-6">
-        {/* Toolbar */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
-          <div className="text-sm text-zinc-600">
-            {album ? (
-              <span>
-                <strong className="text-zinc-900">{album.assetCount}</strong> assets in Immich
-                {album.assetCount !== filteredAssets.length && (
-                  <span> &middot; <strong className="text-zinc-900">{filteredAssets.length}</strong> filtered</span>
-                )}
-              </span>
-            ) : (
-              <span className="text-zinc-400">No Immich album linked</span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Filter */}
-            <span className="text-sm text-zinc-500 mr-1">Filter:</span>
-            {(["all", "image", "video"] as const).map((f) => (
+      <main className="max-w-6xl mx-auto px-6 py-6 space-y-8">
+        {/* ═══════════════════════════════════════════════════════════
+            SECTION 1: UPLOAD
+           ═══════════════════════════════════════════════════════════ */}
+        <section>
+          <h2 className="text-sm font-semibold text-zinc-800 mb-3">Upload Media</h2>
+          <div className="bg-white rounded-lg border border-zinc-200 p-6">
+            <div className="flex items-center gap-4">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,video/*"
+                className="hidden"
+                onChange={(e) => handleUpload(e.target.files)}
+              />
               <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                  filter === f
-                    ? "bg-[var(--accent)] text-white"
-                    : "bg-white text-zinc-600 border border-zinc-200 hover:bg-zinc-50"
-                }`}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-40 transition-opacity"
               >
-                {f === "all" ? "All" : f === "image" ? "Photos" : "Videos"}
+                {uploading ? "Uploading..." : "+ Choose Files"}
               </button>
-            ))}
-
-            <div className="w-px h-6 bg-zinc-200 mx-2 hidden sm:block" />
-
-            {/* Upload */}
-            {!selectionMode && (
-              <>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept="image/*,video/*"
-                  className="hidden"
-                  onChange={(e) => handleUpload(e.target.files)}
-                />
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                  className="px-3 py-1.5 rounded-md text-sm font-medium bg-white text-zinc-700 border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
-                >
-                  {uploading ? "Uploading..." : "+ Upload"}
-                </button>
-                <div className="w-px h-6 bg-zinc-200 mx-2 hidden sm:block" />
-              </>
-            )}
-
-            {/* Selection mode toggle */}
-            {!selectionMode ? (
-              <button
-                onClick={enterSelectionMode}
-                className="px-3 py-1.5 rounded-md text-sm font-medium bg-white text-zinc-700 border border-zinc-200 hover:bg-zinc-50"
-              >
-                Select Media
-              </button>
-            ) : (
-              <button
-                onClick={exitSelectionMode}
-                className="px-3 py-1.5 rounded-md text-sm font-medium bg-zinc-100 text-zinc-700 border border-zinc-200 hover:bg-zinc-200"
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Upload progress & errors (US-004) */}
-        {uploading && Object.keys(uploadProgress).length > 0 && (
-          <div className="mb-4 space-y-2">
-            {Object.entries(uploadProgress).map(([name, pct]) => (
-              <div key={name} className="flex items-center gap-3">
-                <span className="text-xs text-zinc-600 w-32 truncate flex-shrink-0" title={name}>
-                  {name}
-                </span>
-                <div className="flex-1 h-2 bg-zinc-100 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-[var(--accent)] rounded-full transition-all duration-300"
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-                <span className="text-xs text-zinc-500 w-8 text-right">{pct}%</span>
-              </div>
-            ))}
-          </div>
-        )}
-        {uploadErrors.length > 0 && (
-          <div className="mb-4 space-y-2">
-            {uploadErrors.map((err, i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-2.5"
-              >
-                <p className="text-sm text-red-700">{err}</p>
-                <button
-                  onClick={() => setUploadErrors((prev) => prev.filter((_, idx) => idx !== i))}
-                  className="text-red-500 hover:text-red-700 text-sm ml-3"
-                  title="Dismiss"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Selection controls bar */}
-        {selectionMode && (
-          <div className="flex items-center justify-between mb-4 p-3 bg-blue-50 rounded-lg border border-blue-100">
-            <div className="flex items-center gap-3">
-              <button
-                onClick={isAllSelected ? deselectAll : selectAll}
-                className="text-sm font-medium text-blue-700 hover:text-blue-800"
-              >
-                {isAllSelected ? "Deselect All" : "Select All"}
-              </button>
-              <span className="text-sm text-zinc-600">
-                <strong className="text-zinc-900">{selectedIds.size}</strong> selected
-              </span>
+              <p className="text-sm text-zinc-500">or drag and drop files here</p>
             </div>
-            <div className="flex items-center gap-3">
-              <label className="flex items-center gap-2 text-sm text-zinc-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={letAiChoose}
-                  onChange={(e) => {
-                    setLetAiChoose(e.target.checked);
-                    if (e.target.checked) {
-                      // Use same smart-select logic as selectAll
-                      const ids = filteredAssets
-                        .filter((a) => {
-                          if (a.type !== "VIDEO") return true;
-                          const hasScenes = sceneSegments[a.id] && sceneSegments[a.id].length > 0;
-                          return !hasScenes;
-                        })
-                        .map((a) => a.id);
-                      setSelectedIds(new Set(ids));
-                    }
-                  }}
-                  className="rounded border-zinc-300 text-[var(--accent)] focus:ring-[var(--accent)]"
-                />
-                Let AI choose the best
-              </label>
-              {letAiChoose && (
-                <label className="flex items-center gap-2 text-sm text-zinc-600 cursor-pointer" title="Skip expensive LLM calls. Uses fast local scoring only.">
-                  <input
-                    type="checkbox"
-                    checked={localOnly}
-                    onChange={(e) => setLocalOnly(e.target.checked)}
-                    className="rounded border-zinc-300 text-amber-500 focus:ring-amber-400"
-                  />
-                  Local only (no LLM)
-                </label>
-              )}
-              <button
-                onClick={() => {
-                  if (checkForDuplicateScenes()) {
-                    setShowDuplicateWarning(true);
-                  } else {
-                    handleCompose();
-                  }
-                }}
-                disabled={selectedIds.size === 0}
-                className="px-4 py-1.5 bg-[var(--accent)] text-white text-sm font-medium rounded-md hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Compose &rarr;
-              </button>
-            </div>
-          </div>
-        )}
 
-        {/* Generated Results */}
-        {event?.generatedAssets && event.generatedAssets.length > 0 && (
-          <div className="mb-6">
-            <h2 className="text-sm font-semibold text-zinc-700 mb-3">Generated Compositions</h2>
-            <div className="flex flex-wrap gap-3">
-              {event.generatedAssets.map((ga) => (
-                <Link
-                  key={ga.id}
-                  href={`/results/${ga.id}`}
-                  className="flex items-center gap-3 bg-white border border-zinc-200 rounded-lg px-4 py-3 hover:shadow-sm transition-shadow"
-                >
-                  <span className="text-xl">
-                    {ga.outputType === "COLLAGE_POSTER" ? "🖼️" : "🎬"}
-                  </span>
-                  <div>
-                    <p className="text-sm font-medium text-zinc-900">{ga.fileName}</p>
-                    <p className="text-xs text-zinc-500">
-                      {ga.status === "COMPLETED"
-                        ? `${(ga.fileSize / 1024 / 1024).toFixed(2)} MB · ${new Date(ga.createdAt).toLocaleDateString()}`
-                        : ga.status}
-                    </p>
-                  </div>
-                  {ga.immichAssetId && (
-                    <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
-                      In Album
+            {/* Upload progress */}
+            {uploading && Object.keys(uploadProgress).length > 0 && (
+              <div className="mt-4 space-y-2">
+                {Object.entries(uploadProgress).map(([name, pct]) => (
+                  <div key={name} className="flex items-center gap-3">
+                    <span className="text-xs text-zinc-600 w-32 truncate flex-shrink-0" title={name}>
+                      {name}
                     </span>
-                  )}
-                </Link>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Media Grid */}
-        {album && album.assets.length > 0 ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-            {filteredAssets.map((asset) => (
-              <div key={asset.id} className="contents">
-                <MediaCard
-                  asset={asset}
-                  selectionMode={selectionMode}
-                  selected={selectedIds.has(asset.id)}
-                  onToggle={() => toggleSelection(asset.id)}
-                  onView={() => setLightboxAsset(asset)}
-                  onFeedback={(rating) => {
-                    fetch("/api/feedback", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        eventId: id,
-                        sourceAssetId: asset.id,
-                        rating,
-                      }),
-                    });
-                    setFeedbackMap((prev) => ({ ...prev, [asset.id]: rating }));
-                  }}
-                  feedback={feedbackMap[asset.id] || null}
-                  qualityFlags={qualityFlags[asset.id] || undefined}
-                  onDelete={() => setDeleteTarget({ assetId: asset.id, fileName: asset.originalFileName })}
-                />
-                {/* Scene segments for this video */}
-                {asset.type === "VIDEO" && sceneSegments[asset.id] && sceneSegments[asset.id].length > 0 && (
-                  <>
-                    {!expandedScenes.has(asset.id) && selectionMode && (
-                      <div className="col-span-full">
-                        <button
-                          onClick={() => setExpandedScenes((prev) => {
-                            const next = new Set(prev);
-                            next.add(asset.id);
-                            return next;
-                          })}
-                          className="text-xs text-zinc-500 hover:text-zinc-700 flex items-center gap-1 my-1"
-                        >
-                          ▶ Show {sceneSegments[asset.id].length} detected scenes
-                        </button>
-                      </div>
-                    )}
-                    {expandedScenes.has(asset.id) && selectionMode && (
-                      <div className="col-span-full">
-                        <button
-                          onClick={() => setExpandedScenes((prev) => {
-                            const next = new Set(prev);
-                            next.delete(asset.id);
-                            return next;
-                          })}
-                          className="text-xs text-zinc-500 hover:text-zinc-700 flex items-center gap-1 my-1"
-                        >
-                          ▼ Hide {sceneSegments[asset.id].length} scenes
-                        </button>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 mb-2">
-                          {sceneSegments[asset.id].map((seg) => (
-                            <MediaCard
-                              key={seg.id}
-                              asset={{
-                                id: seg.id,
-                                type: "VIDEO",
-                                originalFileName: `${asset.originalFileName} — Scene ${(seg.startTime).toFixed(1)}s-${(seg.endTime).toFixed(1)}s`,
-                                fileCreatedAt: asset.fileCreatedAt,
-                              }}
-                              selectionMode={selectionMode}
-                              selected={selectedIds.has(seg.id)}
-                              onToggle={() => {
-                                setSelectedIds((prev) => {
-                                  const next = new Set(prev);
-                                  if (next.has(seg.id)) next.delete(seg.id);
-                                  else next.add(seg.id);
-                                  return next;
-                                });
-                              }}
-                              onView={() => setLightboxAsset({
-                                id: seg.id,
-                                type: "VIDEO",
-                                originalFileName: asset.originalFileName,
-                                fileCreatedAt: asset.fileCreatedAt,
-                              })}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : album ? (
-          <div className="bg-white rounded-lg border border-zinc-200 p-12 text-center">
-            <p className="text-zinc-500">
-              {filter !== "all"
-                ? `No ${filter === "image" ? "photos" : "videos"} found.`
-                : "This album is empty. Upload media."}
-            </p>
-          </div>
-        ) : (
-          <div className="bg-white rounded-lg border border-zinc-200 p-12 text-center">
-            <p className="text-zinc-500 mb-2">No Immich album linked to this event.</p>
-            <p className="text-sm text-zinc-400">
-              Create an event with an Immich album to browse media here.
-            </p>
-          </div>
-        )}
-      </main>
-
-      {/* AI Ranking Results Panel */}
-      {showRankingPanel && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={() => setShowRankingPanel(false)}
-          />
-          <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-lg max-h-[80vh] overflow-y-auto p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-zinc-900">AI Media Ranking</h2>
-              {rankingLoading && (
-                <span className="text-sm text-zinc-500 animate-pulse">Analyzing...</span>
-              )}
-            </div>
-
-            {rankingLoading && (
-              <div className="text-center py-6">
-                <div className="w-8 h-8 border-2 border-zinc-200 border-t-[var(--accent)] rounded-full animate-spin mx-auto mb-3" />
-                <p className="text-sm text-zinc-600 font-medium">
-                  {rankingProgress?.status || "AI is analyzing your media..."}
-                </p>
-                {rankingProgress && rankingProgress.totalBatches > 0 && (
-                  <div className="mt-3 max-w-xs mx-auto">
-                    <div className="flex items-center justify-between text-xs text-zinc-500 mb-1">
-                      <span>Batch {rankingProgress.currentBatch + 1} / {rankingProgress.totalBatches}</span>
-                      <span>
-                        {rankingProgress.completedBatches} done
-                        {rankingProgress.failedBatches > 0 && `, ${rankingProgress.failedBatches} failed`}
-                      </span>
+                    <div className="flex-1 h-2 bg-zinc-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-[var(--accent)] rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
                     </div>
-                    <div className="w-full h-2 bg-zinc-100 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-[var(--accent)] rounded-full transition-all duration-500"
-                        style={{
-                          width: `${rankingProgress.totalBatches > 0
-                            ? ((rankingProgress.completedBatches + rankingProgress.failedBatches) / rankingProgress.totalBatches) * 100
-                            : 0}%`,
-                        }}
-                      />
-                    </div>
+                    <span className="text-xs text-zinc-500 w-8 text-right">{pct}%</span>
                   </div>
-                )}
-                <p className="text-xs text-zinc-400 mt-2">
-                  Analyzing composition, action, faces, lighting, and emotion
-                </p>
+                ))}
               </div>
             )}
 
-            {/* Post-analysis summary */}
-            {!rankingLoading && rankingProgress && (
-              <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4">
-                <p className="text-sm text-green-800 font-medium">{rankingProgress.status}</p>
-                {ranking?.modelUsed && (
-                  <p className="text-xs text-zinc-500 mt-1">Model: {ranking.modelUsed}</p>
-                )}
-                {rankingProgress.failedBatches > 0 && (
-                  <p className="text-xs text-green-700 mt-0.5">
-                    {rankingProgress.failedBatches} batch(es) had issues but partial results are shown.
-                  </p>
-                )}
+            {/* Upload errors */}
+            {uploadErrors.length > 0 && (
+              <div className="mt-4 space-y-2">
+                {uploadErrors.map((err, i) => (
+                  <div key={i} className="flex items-center justify-between bg-red-50 border border-red-200 rounded-lg px-4 py-2.5">
+                    <p className="text-sm text-red-700">{err}</p>
+                    <button
+                      onClick={() => setUploadErrors((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="text-red-500 hover:text-red-700 text-sm ml-3"
+                      title="Dismiss"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
+          </div>
+        </section>
 
-                {/* Error / Status notification */}
-                {ranking && (
-                  <>
-                    {!ranking.visionConfigured && (
-                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-                        <p className="text-sm text-amber-800 font-medium">
-                          Vision AI not configured
-                        </p>
-                        <p className="text-xs text-amber-700 mt-0.5">
-                          Set VISION_API_URL and VISION_API_KEY in .env to enable AI analysis.
-                        </p>
-                      </div>
-                    )}
+        {/* ═══════════════════════════════════════════════════════════
+            SECTION 2: CURATE (inline from /events/[id]/curate)
+           ═══════════════════════════════════════════════════════════ */}
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-zinc-800">Curate Clips</h2>
+            <span className="text-xs text-zinc-500">
+              {acceptedCount} accepted · {mustIncludeIds.length} must-include
+            </span>
+          </div>
 
-                    {ranking.visionConfigured && ranking.error && (
-                      <div className={`border rounded-lg p-3 mb-4 ${
-                        ranking.isSpendLimit
-                          ? "bg-orange-50 border-orange-200"
-                          : "bg-red-50 border-red-200"
-                      }`}>
-                        <p className={`text-sm font-medium ${
-                          ranking.isSpendLimit ? "text-orange-800" : "text-red-800"
-                        }`}>
-                          {ranking.isSpendLimit ? "⚠ Spend limit reached" : "AI analysis failed"}
-                        </p>
-                        <p className={`text-xs mt-0.5 ${
-                          ranking.isSpendLimit ? "text-orange-700" : "text-red-700"
-                        }`}>
-                          {ranking.error}
-                          {ranking.isSpendLimit && (
-                            <> — <a href="https://venice.ai/settings/billing" target="_blank" rel="noopener" className="underline">Add credits on Venice.ai</a></>
-                          )}
-                        </p>
-                      </div>
-                    )}
-                  </>
-                )}
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            {/* Sidebar: filters + brief */}
+            <aside className="lg:col-span-1 space-y-5">
+              {/* Search */}
+              <div>
+                <label className="text-sm font-medium text-zinc-700 block mb-1">Search clips</label>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Keywords, transcript..."
+                  className="w-full px-3 py-2 rounded-md border border-zinc-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
 
-            {!rankingLoading && ranking && (
-              <>
-
-                {ranking.scores.length > 0 && (
-                  <div className="space-y-3 mb-6">
-                    {ranking.scores.map((score) => (
-                      <div
-                        key={score.assetId}
-                        className={`flex items-start gap-3 p-3 rounded-lg border ${
-                          score.rank <= 3
-                            ? "border-[var(--accent)] bg-blue-50"
-                            : "border-zinc-200 bg-white"
+              {/* Tags */}
+              {allTags.length > 0 && (
+                <div>
+                  <label className="text-sm font-medium text-zinc-700 block mb-2">Filter by tags</label>
+                  <div className="flex flex-wrap gap-2">
+                    {allTags.map((tag) => (
+                      <button
+                        key={tag}
+                        onClick={() => toggleTag(tag)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                          selectedTags.has(tag)
+                            ? "bg-blue-50 text-blue-700 border-blue-300"
+                            : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50"
                         }`}
                       >
-                        <div
-                          className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-                            score.rank === 1
-                              ? "bg-yellow-400 text-yellow-900"
-                              : score.rank === 2
-                              ? "bg-zinc-300 text-zinc-700"
-                              : score.rank === 3
-                              ? "bg-amber-600 text-white"
-                              : "bg-zinc-100 text-zinc-500"
-                          }`}
-                        >
-                          {score.rank}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <span className="font-medium text-zinc-900 text-sm">
-                              Score: {score.score}/100
-                            </span>
-                            {score.framesAnalyzed && score.framesAnalyzed > 1 && (
-                              <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">
-                                {score.framesAnalyzed} frames analyzed
-                              </span>
-                            )}
-                            {score.framesAnalyzed === 1 && (
-                              <span className="text-xs px-1.5 py-0.5 bg-zinc-100 text-zinc-500 rounded">
-                                1 frame
-                              </span>
-                            )}
-                            {score.audioScore !== undefined && score.audioScore > 0 && (
-                              <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">
-                                Audio: {score.audioScore}/100
-                              </span>
-                            )}
-                          </div>
-                          {score.transcriptPreview && (
-                            <p className="text-[11px] text-zinc-500 mb-1 italic leading-tight">
-                              &ldquo;{score.transcriptPreview}&rdquo;
-                            </p>
+                        {tag}
+                      </button>
+                    ))}
+                  </div>
+                  {selectedTags.size > 0 && (
+                    <button
+                      onClick={() => setSelectedTags(new Set())}
+                      className="text-xs text-zinc-400 hover:text-zinc-600 mt-2 underline"
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Sort */}
+              <div>
+                <label className="text-sm font-medium text-zinc-700 block mb-1">Sort by</label>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as any)}
+                  className="w-full px-3 py-2 rounded-md border border-zinc-300 text-sm bg-white"
+                >
+                  <option value="score">Composite Score</option>
+                  <option value="duration">Duration</option>
+                  <option value="type">Clip Type</option>
+                </select>
+              </div>
+
+              {/* Creative Brief */}
+              <div className="bg-white rounded-lg border border-zinc-200 p-4 space-y-4">
+                <h3 className="font-semibold text-zinc-900">Creative Brief</h3>
+                <div>
+                  <label className="text-xs font-medium text-zinc-600 block mb-1">Brief (max 500 chars)</label>
+                  <textarea
+                    value={brief}
+                    onChange={(e) => setBrief(e.target.value.slice(0, 500))}
+                    placeholder={SPORT_BRIEF_EXAMPLES[event.sport?.toLowerCase()] ?? SPORT_BRIEF_EXAMPLES.default}
+                    rows={4}
+                    className="w-full px-3 py-2 rounded-md border border-zinc-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                  />
+                  <p className="text-xs text-zinc-400 mt-1 text-right">{brief.length}/500</p>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-zinc-600 block mb-1">Target Format</label>
+                  <select
+                    value={targetFormat}
+                    onChange={(e) => setTargetFormat(e.target.value)}
+                    className="w-full px-3 py-2 rounded-md border border-zinc-300 text-sm bg-white"
+                  >
+                    <option value="">Select format...</option>
+                    {FORMAT_OPTIONS.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-zinc-600 block mb-1">Energy</label>
+                  <div className="flex flex-wrap gap-2">
+                    {ENERGY_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setEnergyPreset(opt.value)}
+                        className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+                          energyPreset === opt.value
+                            ? "bg-blue-50 text-blue-700 border-blue-300"
+                            : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={createCampaign}
+                  disabled={acceptedCount < 3 || !targetFormat || creating}
+                  className="w-full py-2.5 rounded-md text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  {creating ? "Creating Campaign..." : "Create Campaign"}
+                </button>
+                {acceptedCount < 3 && (
+                  <p className="text-xs text-red-500">Accept at least 3 clips to create a campaign.</p>
+                )}
+              </div>
+            </aside>
+
+            {/* Clip grid */}
+            <section className="lg:col-span-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-zinc-900">
+                  Scored Clips
+                  <span className="ml-2 text-sm font-normal text-zinc-500">
+                    {sortedClips.length} shown
+                  </span>
+                </h3>
+                <button
+                  onClick={selectAllAccepted}
+                  className="px-3 py-1.5 rounded-md text-sm font-medium bg-white text-zinc-700 border border-zinc-200 hover:bg-zinc-50"
+                >
+                  Accept All ≥50
+                </button>
+              </div>
+
+              {clipsLoading ? (
+                <div className="text-center py-20 bg-white rounded-lg border border-zinc-200">
+                  <p className="text-zinc-500">Loading clips...</p>
+                </div>
+              ) : sortedClips.length === 0 ? (
+                <div className="text-center py-20 bg-white rounded-lg border border-zinc-200">
+                  <p className="text-zinc-500">
+                    {clips.length === 0
+                      ? "No scored clips yet. Upload footage and wait for ingest + scoring."
+                      : "No clips match your filters."}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                  {sortedClips.map((clip) => {
+                    const score = clip.clipScore?.compositeScore ?? null;
+                    const type = clip.clipScore?.clipType ?? "UNKNOWN";
+                    const accepted = acceptedMap[clip.id] ?? false;
+                    const must = mustIncludeMap[clip.id] ?? false;
+                    return (
+                      <div
+                        key={clip.id}
+                        className={`bg-white rounded-lg border transition-all overflow-hidden ${
+                          accepted ? "border-zinc-200" : "border-zinc-200 opacity-60"
+                        }`}
+                      >
+                        {/* Thumbnail */}
+                        <div className="aspect-video relative bg-zinc-100">
+                          {clip.immichAssetId ? (
+                            <img
+                              src={`/api/immich/thumbnail/${clip.immichAssetId}`}
+                              alt="Clip thumbnail"
+                              loading="lazy"
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-zinc-400 text-sm">
+                              No thumbnail
+                            </div>
                           )}
-                          {score.keywordHits && score.keywordHits.length > 0 && (
-                            <div className="flex flex-wrap gap-1 mb-1">
-                              {score.keywordHits.slice(0, 4).map((kw, i) => (
+                          {score !== null && (
+                            <span
+                              className={`absolute top-2 left-2 px-2 py-0.5 rounded text-xs font-bold border ${scoreBadgeColor(
+                                score
+                              )}`}
+                            >
+                              {score.toFixed(1)}
+                            </span>
+                          )}
+                          {clip.durationSeconds && (
+                            <span className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">
+                              {clip.durationSeconds.toFixed(1)}s
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Info */}
+                        <div className="p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold text-zinc-700 uppercase tracking-wide">
+                              {type}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] text-zinc-400">
+                                V:{(clip.clipScore?.visionScore ?? 0).toFixed(0)}
+                              </span>
+                              <span className="text-[10px] text-zinc-400">
+                                A:{(clip.clipScore?.audioScore ?? 0).toFixed(0)}
+                              </span>
+                              <span className="text-[10px] text-zinc-400">
+                                M:{(clip.clipScore?.motionScore ?? 0).toFixed(0)}
+                              </span>
+                            </div>
+                          </div>
+
+                          {clip.assetTags.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {clip.assetTags.slice(0, 6).map((t) => (
                                 <span
-                                  key={i}
-                                  className="text-[10px] px-1.5 py-0.5 bg-purple-50 text-purple-600 rounded-full border border-purple-100"
+                                  key={t.tag}
+                                  className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600"
                                 >
-                                  {kw}
+                                  {t.tag}
                                 </span>
                               ))}
                             </div>
                           )}
-                          {score.segments && score.segments.length > 0 && (
-                            <div className="mb-2 space-y-1.5">
-                              {score.segments.map((seg, i) => (
-                                <div
-                                  key={i}
-                                  className="flex items-center gap-2 text-[11px] bg-zinc-50 border border-zinc-100 rounded px-2 py-1"
-                                >
-                                  <span className={`
-                                    px-1.5 py-0.5 rounded text-[10px] font-medium
-                                    ${seg.estimatedType === "action" ? "bg-orange-100 text-orange-700" : ""}
-                                    ${seg.estimatedType === "speech" ? "bg-green-100 text-green-700" : ""}
-                                    ${seg.estimatedType === "mixed" ? "bg-blue-100 text-blue-700" : ""}
-                                    ${seg.estimatedType === "montage" ? "bg-zinc-200 text-zinc-600" : ""}
-                                  `}>
-                                    {seg.estimatedType}
-                                  </span>
-                                  <span className="text-zinc-500 font-mono">
-                                    {Math.floor(seg.startTime / 60)}:{String(Math.floor(seg.startTime % 60)).padStart(2, "0")}
-                                    &ndash;
-                                    {Math.floor(seg.endTime / 60)}:{String(Math.floor(seg.endTime % 60)).padStart(2, "0")}
-                                  </span>
-                                  <span className="text-zinc-400">({seg.duration.toFixed(1)}s)</span>
-                                  <span className="text-zinc-600 ml-auto">score {seg.score}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          {score.weighting && (
-                            <p className="text-[11px] text-zinc-400 mb-1.5 leading-tight">
-                              {score.weighting}
+
+                          {clip.clipScore?.transcriptExcerpt && (
+                            <p className="text-xs text-zinc-500 line-clamp-2 italic">
+                              &ldquo;{clip.clipScore.transcriptExcerpt}&rdquo;
                             </p>
                           )}
-                          <div className="flex flex-wrap gap-1">
-                            {score.reasons.map((r, i) => (
-                              <span
-                                key={i}
-                                className="text-xs px-2 py-0.5 bg-zinc-100 text-zinc-600 rounded-full"
-                              >
-                                {r}
-                              </span>
-                            ))}
+
+                          <div className="flex items-center gap-2 pt-1">
+                            <button
+                              onClick={() => toggleAccept(clip.id)}
+                              className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                                accepted
+                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+                                  : "bg-zinc-100 text-zinc-500 border border-zinc-200 hover:bg-zinc-200"
+                              }`}
+                            >
+                              {accepted ? "Accepted" : "Rejected"}
+                            </button>
+                            <button
+                              onClick={() => toggleMustInclude(clip.id)}
+                              title="Must Include"
+                              className={`px-2 py-1.5 rounded-md text-xs font-bold border transition-colors ${
+                                must
+                                  ? "bg-amber-50 text-amber-700 border-amber-300"
+                                  : "bg-white text-zinc-400 border-zinc-200 hover:text-amber-600"
+                              }`}
+                            >
+                              &#9733;
+                            </button>
                           </div>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
-
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowRankingPanel(false)}
-                    className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
-                  >
-                    Close
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowRankingPanel(false);
-                      setShowOutputPanel(true);
-                    }}
-                    className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)]"
-                  >
-                    Continue to Output &rarr;
-                  </button>
+                    );
+                  })}
                 </div>
-              </>
-            )}
+              )}
+            </section>
           </div>
-        </div>
-      )}
+        </section>
 
-      {/* Output Type Selection Panel */}
-      {showOutputPanel && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={() => setShowOutputPanel(false)}
-          />
-          <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-lg p-6">
-            <h2 className="text-lg font-semibold text-zinc-900 mb-1">Choose Output Type</h2>
-            <p className="text-sm text-zinc-500 mb-5">
-              {selectedIds.size} asset{selectedIds.size !== 1 ? "s" : ""} selected
-              {letAiChoose && " — AI will rank and select the best"}
-            </p>
-
-            <div className="space-y-3 mb-6">
-              <OutputOption
-                title="Collage Poster"
-                description="Grid layout of best photos with branded captions"
-                icon="🖼️"
-                selected={outputType === "collage"}
-                onClick={() => setOutputType("collage")}
-              />
-              <OutputOption
-                title="15s Highlight Video"
-                description="Quick cuts with transitions and captions"
-                icon="🎬"
-                selected={outputType === "highlight"}
-                onClick={() => setOutputType("highlight")}
-              />
-              <OutputOption
-                title="Full Wrap-up Video"
-                description="Extended edit with all selected media"
-                icon="🎞️"
-                selected={outputType === "wrapup"}
-                onClick={() => setOutputType("wrapup")}
-              />
+        {/* ═══════════════════════════════════════════════════════════
+            SECTION 3: ACTIVE JOBS
+           ═══════════════════════════════════════════════════════════ */}
+        {jobs.length > 0 && (
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-zinc-800">Active Jobs</h2>
+              {hasActiveJobs && (
+                <span className="inline-flex items-center gap-1 text-xs text-blue-600">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                  Polling every 5s
+                </span>
+              )}
+              <Link
+                href="/dashboard"
+                className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+              >
+                Full Dashboard →
+              </Link>
             </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowOutputPanel(false)}
-                className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={!outputType}
-                onClick={() => {
-                  setShowOutputPanel(false);
-                  setShowIntentPanel(true);
-                }}
-                className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Continue
-              </button>
+            <div className="bg-white rounded-lg border border-zinc-200 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-zinc-50 border-b border-zinc-200">
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Type</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Status</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Elapsed</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Attempts</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Error</th>
+                      <th className="text-right px-4 py-2 text-xs font-medium text-zinc-500">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100">
+                    {jobs.map((job) => (
+                      <tr key={job.id} className="hover:bg-zinc-50 transition-colors">
+                        <td className="px-4 py-3 text-zinc-700 font-medium">
+                          {JOB_TYPE_LABELS[job.type] || job.type}
+                        </td>
+                        <td className="px-4 py-3">{getStatusBadge(job.status)}</td>
+                        <td className="px-4 py-3 text-zinc-500">
+                          {job.status === "RUNNING" ? formatDuration(job.startedAt) : "—"}
+                        </td>
+                        <td className="px-4 py-3 text-zinc-500">
+                          {job.attempts}/{job.maxAttempts}
+                        </td>
+                        <td className="px-4 py-3">
+                          {job.error ? (
+                            <span className="text-xs text-red-600 truncate max-w-[200px] block" title={job.error}>
+                              {job.error.slice(0, 80)}{job.error.length > 80 ? "..." : ""}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-300">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {job.status === "FAILED" || job.status === "RETRYING" ? (
+                            <button
+                              onClick={() => handleRetryJob(job.id)}
+                              disabled={retryingJobId === job.id}
+                              className="text-xs px-3 py-1.5 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium disabled:opacity-40 transition-colors"
+                            >
+                              {retryingJobId === job.id ? "Retrying..." : "Retry"}
+                            </button>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </section>
+        )}
 
-      {/* User Intent Panel */}
-      {showIntentPanel && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={() => setShowIntentPanel(false)}
-          />
-          <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-lg p-6">
-            <h2 className="text-lg font-semibold text-zinc-900 mb-1">Describe Your Vision</h2>
-            <p className="text-sm text-zinc-500 mb-5">
-              Tell the AI Director what you want. Keep it simple — the AI will translate this into a precise production script.
-            </p>
+        {/* ═══════════════════════════════════════════════════════════
+            SECTION 4: ALL MEDIA (collapsed by default)
+           ═══════════════════════════════════════════════════════════ */}
+        <section>
+          <button
+            onClick={() => setShowAllMedia((prev) => !prev)}
+            className="flex items-center gap-2 text-sm font-semibold text-zinc-800 hover:text-zinc-600 transition-colors mb-3"
+          >
+            <span className="text-xs">{showAllMedia ? "▼" : "▶"}</span>
+            All Media
+            {album && <span className="text-zinc-500 font-normal">({album.assetCount} assets)</span>}
+          </button>
 
-            <div className="mb-5">
-              <textarea
-                value={userIntent}
-                onChange={(e) => setUserIntent(e.target.value)}
-                rows={4}
-                className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
-                placeholder={`Examples:\n• "An upbeat highlight reel showing every goal and celebration"\n• "A calm, inspiring wrap-up with slow transitions and no text"\n• "High energy montage with quick cuts for social media"`}
-              />
-            </div>
+          {showAllMedia && (
+            <div className="space-y-4">
+              {/* Media filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-500">Filter:</span>
+                {(["all", "image", "video"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setMediaFilter(f)}
+                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                      mediaFilter === f
+                        ? "bg-[var(--accent)] text-white"
+                        : "bg-white text-zinc-600 border border-zinc-200 hover:bg-zinc-50"
+                    }`}
+                  >
+                    {f === "all" ? "All" : f === "image" ? "Photos" : "Videos"}
+                  </button>
+                ))}
+              </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={() => {
-                  setShowIntentPanel(false);
-                  setShowOutputPanel(true);
-                }}
-                className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
-              >
-                Back
-              </button>
-              <button
-                onClick={async () => {
-                  setCompositionLoading(true);
-                  setShowIntentPanel(false);
-                  setShowScriptPanel(true);
-
-                  const selectedAssets = filteredAssets.filter((a) => selectedIds.has(a.id));
-
-                  try {
-                    const res = await fetch("/api/ai/composition", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        event: {
-                          name: event?.name,
-                          sport: event?.sport,
-                          city: event?.city,
-                          eventDate: event?.eventDate,
-                          description: event?.description,
-                        },
-                        assets: selectedAssets.map((a) => ({
-                          assetId: a.id,
-                          fileName: a.originalFileName,
-                          type: a.type === "VIDEO" ? "VIDEO" : "IMAGE",
-                          aiScore: ranking?.scores?.find((s) => s.assetId === a.id)?.score,
-                          aiReasons: ranking?.scores?.find((s) => s.assetId === a.id)?.reasons,
-                        })),
-                        outputType,
-                        userIntent: userIntent.trim() || undefined,
-                      }),
-                    });
-
-                    const data = await res.json();
-                    if (data.success) {
-                      setCompositionScript(data.script);
-                      setScriptJsonText(JSON.stringify(data.script, null, 2));
-                    } else {
-                      setCompositionScript({ type: "error", message: data.error });
-                      setScriptJsonText("");
-                    }
-                  } catch {
-                    setCompositionScript({ type: "error", message: "Failed to generate composition" });
-                    setScriptJsonText("");
-                  } finally {
-                    setCompositionLoading(false);
-                  }
-                }}
-                className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {compositionLoading ? "Generating..." : userIntent.trim() ? "Generate with Intent" : "Generate (Auto)"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Composition Script Review Panel */}
-      {showScriptPanel && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={() => setShowScriptPanel(false)}
-          />
-          <div className="relative bg-white rounded-t-xl sm:rounded-xl shadow-xl w-full sm:max-w-2xl max-h-[85vh] overflow-y-auto p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-zinc-900">Review & Edit Composition Script</h2>
-              {compositionLoading && (
-                <span className="text-sm text-zinc-500 animate-pulse">Generating...</span>
+              {/* Media grid */}
+              {album && album.assets.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                  {filteredAssets.map((asset) => (
+                    <div
+                      key={asset.id}
+                      onClick={() => setLightboxAsset(asset)}
+                      className="group relative bg-white rounded-lg border border-zinc-200 overflow-hidden hover:shadow-md transition-shadow cursor-pointer"
+                    >
+                      <div className="aspect-square relative bg-zinc-100">
+                        {asset.type === "VIDEO" ? (
+                          <>
+                            <img
+                              src={`/api/immich/thumbnail/${asset.id}`}
+                              alt={asset.originalFileName}
+                              loading="lazy"
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <svg className="w-12 h-12 text-white/90 drop-shadow-lg" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z" />
+                              </svg>
+                            </div>
+                            <div className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-0.5 rounded">
+                              VIDEO
+                            </div>
+                          </>
+                        ) : (
+                          <img
+                            src={`/api/immich/thumbnail/${asset.id}`}
+                            alt={asset.originalFileName}
+                            loading="lazy"
+                            className="w-full h-full object-cover"
+                          />
+                        )}
+                      </div>
+                      <div className="p-2">
+                        <p className="text-xs text-zinc-500 truncate" title={asset.originalFileName}>
+                          {asset.originalFileName}
+                        </p>
+                        <p className="text-xs text-zinc-400 mt-0.5">
+                          {new Date(asset.fileCreatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : album ? (
+                <div className="bg-white rounded-lg border border-zinc-200 p-8 text-center">
+                  <p className="text-zinc-500">
+                    {mediaFilter !== "all" ? `No ${mediaFilter === "image" ? "photos" : "videos"} found.` : "This album is empty."}
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-lg border border-zinc-200 p-8 text-center">
+                  <p className="text-zinc-500">No Immich album linked to this event.</p>
+                </div>
               )}
             </div>
+          )}
+        </section>
+      </main>
 
-            {compositionLoading && !compositionScript && (
-              <div className="text-center py-8">
-                <div className="w-8 h-8 border-2 border-zinc-200 border-t-[var(--accent)] rounded-full animate-spin mx-auto mb-3" />
-                <p className="text-sm text-zinc-500">AI Director is planning your composition...</p>
-                <p className="text-xs text-zinc-400 mt-1">Based on your intent: layout, order, captions, and transitions</p>
-              </div>
-            )}
-
-            {!compositionLoading && compositionScript?.type === "error" && (
-              <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
-                <p className="text-sm text-red-700 font-medium">Error</p>
-                <p className="text-sm text-red-600 mt-1">{compositionScript.message}</p>
-              </div>
-            )}
-
-            {!compositionLoading && compositionScript && compositionScript.type !== "error" && (
-              <>
-                {/* Human-readable summary */}
-                <div className="bg-zinc-50 rounded-lg border border-zinc-200 p-4 mb-4">
-                  <h3 className="font-semibold text-zinc-900 mb-2">
-                    {compositionScript.title || "Untitled Composition"}
-                  </h3>
-                  <p className="text-sm text-zinc-600 mb-3">
-                    {compositionScript.subtitle || ""}
-                  </p>
-
-                  {compositionScript.type === "collage" ? (
-                    <div className="space-y-2">
-                      <p className="text-sm">
-                        <strong className="text-zinc-700">Layout:</strong>{" "}
-                        {compositionScript.layout || "grid"} ({compositionScript.gridCols}x{compositionScript.gridRows})
-                      </p>
-                      <p className="text-sm">
-                        <strong className="text-zinc-700">Dimensions:</strong>{" "}
-                        {compositionScript.dimensions?.width}x{compositionScript.dimensions?.height}px
-                      </p>
-                      <p className="text-sm">
-                        <strong className="text-zinc-700">Images:</strong>{" "}
-                        {compositionScript.images?.length || 0} placed
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <p className="text-sm">
-                        <strong className="text-zinc-700">Total Duration:</strong>{" "}
-                        {compositionScript.totalDuration}s
-                      </p>
-                      <p className="text-sm">
-                        <strong className="text-zinc-700">Clips:</strong>{" "}
-                        {compositionScript.clips?.length || 0}
-                      </p>
-                      <p className="text-sm">
-                        <strong className="text-zinc-700">Music Tempo:</strong>{" "}
-                        {compositionScript.musicTempo || "none"}
-                      </p>
-                      <p className="text-sm">
-                        <strong className="text-zinc-700">Resolution:</strong>{" "}
-                        {compositionScript.resolution || "1080p"}
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Editable JSON */}
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-zinc-700 mb-2">
-                    Edit Script JSON
-                    <span className="text-zinc-400 font-normal ml-1">(advanced — changes take effect on execution)</span>
-                  </label>
-                  <textarea
-                    value={scriptJsonText}
-                    onChange={(e) => setScriptJsonText(e.target.value)}
-                    rows={12}
-                    className="w-full px-3 py-2 border border-zinc-300 rounded-lg text-xs font-mono bg-zinc-50 focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y"
-                    spellCheck={false}
-                  />
-                </div>
-
-                <div className="flex gap-3 mb-4">
-                  <button
-                    onClick={() => setShowScriptPanel(false)}
-                    className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    disabled={compositionLoading}
-                    onClick={async () => {
-                      // Parse the edited JSON
-                      let scriptToExecute = compositionScript;
-                      try {
-                        if (scriptJsonText.trim()) {
-                          scriptToExecute = JSON.parse(scriptJsonText);
-                        }
-                      } catch (err) {
-                        alert("Invalid JSON in script editor. Please fix before executing.");
-                        return;
-                      }
-
-                      setCompositionLoading(true);
-                      try {
-                        const res = await fetch("/api/composition/execute", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            script: scriptToExecute,
-                            eventId: id,
-                          }),
-                        });
-                        const data = await res.json();
-                        if (data.success) {
-                          alert(`Composition complete!\nFile: ${data.fileName}\nSize: ${(data.fileSize / 1024 / 1024).toFixed(2)} MB`);
-                          setShowScriptPanel(false);
-                          await fetchEventData();
-                        } else {
-                          alert(`Error: ${data.error}`);
-                        }
-                      } catch {
-                        alert("Failed to execute composition");
-                      } finally {
-                        setCompositionLoading(false);
-                      }
-                    }}
-                    className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {compositionLoading ? "Processing..." : "Execute Composition"}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-      {/* AI Assistant Chat Panel */}
-      {chatOpen && (
-        <div className="fixed bottom-4 right-4 w-80 sm:w-96 bg-white rounded-xl border border-zinc-200 shadow-2xl z-50 flex flex-col overflow-hidden" style={{ maxHeight: "500px" }}>
-          {/* Chat header */}
-          <div className="px-4 py-3 bg-[var(--accent)] text-white flex items-center justify-between flex-shrink-0">
-            <div className="flex items-center gap-2">
-              <span className="text-lg">🤖</span>
-              <span className="font-medium text-sm">Composition Assistant</span>
+      {/* ── Upload Toast ── */}
+      {showUploadToast && (
+        <div className="fixed top-4 right-4 z-50 bg-green-50 border border-green-200 rounded-lg px-4 py-3 shadow-lg max-w-sm animate-in slide-in-from-top-2">
+          <div className="flex items-start gap-2">
+            <span className="text-green-600 text-lg">✓</span>
+            <div>
+              <p className="text-sm font-medium text-green-800">Upload complete</p>
+              <p className="text-xs text-green-700 mt-0.5">
+                Your footage is being processed. We&apos;ll notify you when it&apos;s ready.
+              </p>
             </div>
-            <button onClick={() => setChatOpen(false)} className="text-white/80 hover:text-white text-sm">
-              Close
+            <button onClick={() => setShowUploadToast(false)} className="text-green-600 hover:text-green-800 text-sm ml-2">
+              ×
             </button>
           </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
-            {chatMessages.map((msg, idx) => (
-              <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div
-                  className={`max-w-[85%] text-sm rounded-lg px-3 py-2 ${
-                    msg.role === "user"
-                      ? "bg-[var(--accent)] text-white rounded-br-none"
-                      : "bg-zinc-100 text-zinc-800 rounded-bl-none"
-                  }`}
-                >
-                  {msg.content}
-                </div>
-              </div>
-            ))}
-            {chatLoading && (
-              <div className="flex justify-start">
-                <div className="bg-zinc-100 rounded-lg rounded-bl-none px-3 py-2">
-                  <span className="text-sm text-zinc-500">Thinking...</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Input */}
-          <div className="p-3 border-t border-zinc-200 flex-shrink-0">
-            <div className="flex gap-2">
-              <input
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && chatInput.trim()) {
-                    const text = chatInput.trim();
-                    setChatInput("");
-                    setChatMessages((prev) => [...prev, { role: "user", content: text }]);
-                    setChatLoading(true);
-                    fetch("/api/chat", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        message: text,
-                        history: chatMessages,
-                        context: {
-                          eventName: event?.name || "",
-                          sport: event?.sport || "",
-                          city: event?.city || "",
-                          eventDate: event?.eventDate || "",
-                          selectedCount: selectedIds.size,
-                          outputType: outputType || undefined,
-                        },
-                      }),
-                    })
-                      .then((r) => r.json())
-                      .then((data) => {
-                        if (data.success) {
-                          setChatMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
-                        } else {
-                          setChatMessages((prev) => [...prev, { role: "assistant", content: `Error: ${data.error}` }]);
-                        }
-                      })
-                      .catch(() => {
-                        setChatMessages((prev) => [...prev, { role: "assistant", content: "Failed to get response. Please try again." }]);
-                      })
-                      .finally(() => setChatLoading(false));
-                  }
-                }}
-                placeholder="Ask about composition..."
-                className="flex-1 text-sm px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent"
-              />
-              <button
-                onClick={() => {
-                  const text = chatInput.trim();
-                  if (!text) return;
-                  setChatInput("");
-                  setChatMessages((prev) => [...prev, { role: "user", content: text }]);
-                  setChatLoading(true);
-                  fetch("/api/chat", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      message: text,
-                      history: chatMessages,
-                      context: {
-                        eventName: event?.name || "",
-                        sport: event?.sport || "",
-                        city: event?.city || "",
-                        eventDate: event?.eventDate || "",
-                        selectedCount: selectedIds.size,
-                        outputType: outputType || undefined,
-                      },
-                    }),
-                  })
-                    .then((r) => r.json())
-                    .then((data) => {
-                      if (data.success) {
-                        setChatMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
-                      } else {
-                        setChatMessages((prev) => [...prev, { role: "assistant", content: `Error: ${data.error}` }]);
-                      }
-                    })
-                    .catch(() => {
-                      setChatMessages((prev) => [...prev, { role: "assistant", content: "Failed to get response. Please try again." }]);
-                    })
-                    .finally(() => setChatLoading(false));
-                }}
-                disabled={chatLoading || !chatInput.trim()}
-                className="px-3 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Send
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
-      {/* Lightbox */}
+      {/* ── Lightbox ── */}
       {lightboxAsset && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
-          onClick={() => setLightboxAsset(null)}
-        >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90" onClick={() => setLightboxAsset(null)}>
           <div className="relative max-w-[90vw] max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
             {lightboxAsset.type === "VIDEO" ? (
               <video
@@ -1607,67 +1110,6 @@ export default function EventPage() {
         </div>
       )}
 
-      {/* Duplicate Warning Modal (US-006) */}
-      {showDuplicateWarning && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setShowDuplicateWarning(false)} />
-          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
-            <h3 className="text-lg font-semibold text-zinc-900 mb-2">Duplicate Content Warning</h3>
-            <p className="text-sm text-zinc-600 mb-6">
-              This full video contains scenes already selected. Using both may create duplicate content.
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowDuplicateWarning(false)}
-                className="flex-1 px-4 py-2.5 border border-zinc-200 text-zinc-700 rounded-lg text-sm font-medium hover:bg-zinc-50"
-              >
-                Go back and fix
-              </button>
-              <button
-                onClick={() => {
-                  setShowDuplicateWarning(false);
-                  handleCompose();
-                }}
-                className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent-hover)]"
-              >
-                Proceed anyway
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Upload completion toast (US-004) */}
-      {showUploadToast && (
-        <div className="fixed top-4 right-4 z-50 bg-green-50 border border-green-200 rounded-lg px-4 py-3 shadow-lg max-w-sm animate-in slide-in-from-top-2">
-          <div className="flex items-start gap-2">
-            <span className="text-green-600 text-lg">✓</span>
-            <div>
-              <p className="text-sm font-medium text-green-800">Upload complete</p>
-              <p className="text-xs text-green-700 mt-0.5">
-                Your footage is being processed. We&apos;ll notify you when it&apos;s ready.
-              </p>
-            </div>
-            <button
-              onClick={() => setShowUploadToast(false)}
-              className="text-green-600 hover:text-green-800 text-sm ml-2"
-            >
-              ×
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Chat toggle button */}
-      {!chatOpen && (
-        <button
-          onClick={() => setChatOpen(true)}
-          className="fixed bottom-6 right-6 w-14 h-14 bg-[var(--accent)] text-white rounded-full shadow-lg hover:bg-[var(--accent-hover)] flex items-center justify-center z-40"
-          title="Composition Assistant"
-        >
-          <span className="text-2xl">🤖</span>
-        </button>
-      )}
       {/* ── Edit Event Modal ── */}
       {showEditModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -1678,7 +1120,8 @@ export default function EventPage() {
               <div>
                 <label className="block text-sm font-medium text-zinc-700">Name</label>
                 <input
-                  required value={editForm.name}
+                  required
+                  value={editForm.name}
                   onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
                   className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
@@ -1704,7 +1147,8 @@ export default function EventPage() {
               <div>
                 <label className="block text-sm font-medium text-zinc-700">Date</label>
                 <input
-                  type="date" value={editForm.eventDate}
+                  type="date"
+                  value={editForm.eventDate}
                   onChange={(e) => setEditForm((p) => ({ ...p, eventDate: e.target.value }))}
                   className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
@@ -1712,17 +1156,26 @@ export default function EventPage() {
               <div>
                 <label className="block text-sm font-medium text-zinc-700">Description</label>
                 <textarea
-                  rows={2} value={editForm.description}
+                  rows={2}
+                  value={editForm.description}
                   onChange={(e) => setEditForm((p) => ({ ...p, description: e.target.value }))}
                   className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
               </div>
               {editError && <p className="text-sm text-red-600">{editError}</p>}
               <div className="flex items-center justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setShowEditModal(false)}
-                  className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors">Cancel</button>
-                <button type="submit" disabled={editLoading}
-                  className="text-sm px-4 py-2 rounded-md bg-[var(--accent)] text-white font-medium hover:opacity-90 disabled:opacity-50 transition-opacity">
+                <button
+                  type="button"
+                  onClick={() => setShowEditModal(false)}
+                  className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editLoading}
+                  className="text-sm px-4 py-2 rounded-md bg-[var(--accent)] text-white font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
                   {editLoading ? "Saving..." : "Save Changes"}
                 </button>
               </div>
@@ -1742,10 +1195,17 @@ export default function EventPage() {
             </p>
             {deleteLoading && <p className="text-sm text-zinc-500 mb-2">Removing...</p>}
             <div className="flex items-center justify-end gap-3">
-              <button onClick={() => setDeleteTarget(null)}
-                className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors">Cancel</button>
-              <button onClick={handleDeleteAsset} disabled={deleteLoading}
-                className="text-sm px-4 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 transition-colors">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteAsset}
+                disabled={deleteLoading}
+                className="text-sm px-4 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
                 Remove
               </button>
             </div>
@@ -1753,202 +1213,5 @@ export default function EventPage() {
         </div>
       )}
     </div>
-  );
-}
-
-      function MediaCard({
-  asset,
-  selectionMode,
-  selected,
-  onToggle,
-  onView,
-  onFeedback,
-  feedback,
-  qualityFlags,
-  onDelete,
-}: {
-  asset: ImmichAsset;
-  selectionMode: boolean;
-  selected: boolean;
-  onToggle: () => void;
-  onView: () => void;
-  onFeedback?: (rating: "POSITIVE" | "NEGATIVE") => void;
-  feedback?: "POSITIVE" | "NEGATIVE" | null;
-  qualityFlags?: string[];
-  onDelete?: () => void;
-}) {
-  const [loaded, setLoaded] = useState(false);
-  const isVideo = asset.type === "VIDEO";
-
-  return (
-    <div
-      onClick={() => {
-        if (selectionMode) {
-          onToggle();
-        } else {
-          onView();
-        }
-      }}
-      className={`group relative bg-white rounded-lg border overflow-hidden hover:shadow-md transition-shadow cursor-pointer ${
-        selected ? "border-[var(--accent)] ring-2 ring-[var(--accent)]" : "border-zinc-200"
-      }`}
-    >
-      {/* Selection checkbox */}
-      {selectionMode && (
-        <div className="absolute top-2 left-2 z-10">
-          <div
-            className={`w-6 h-6 rounded border-2 flex items-center justify-center transition-colors ${
-              selected
-                ? "bg-[var(--accent)] border-[var(--accent)]"
-                : "bg-white/90 border-zinc-300"
-            }`}
-          >
-            {selected && (
-              <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20">
-                <path
-                  fillRule="evenodd"
-                  d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                  clipRule="evenodd"
-                />
-              </svg>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Feedback buttons (visible on hover when not selecting) */}
-      {!selectionMode && onFeedback && (
-        <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-          <button
-            onClick={(e) => { e.stopPropagation(); onFeedback("POSITIVE"); }}
-            className={`w-7 h-7 rounded-full flex items-center justify-center text-sm ${
-              feedback === "POSITIVE"
-                ? "bg-green-500 text-white"
-                : "bg-white/90 text-zinc-500 hover:text-green-600"
-            } shadow-sm`}
-            title="Good example"
-          >
-            👍
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onFeedback("NEGATIVE"); }}
-            className={`w-7 h-7 rounded-full flex items-center justify-center text-sm ${
-              feedback === "NEGATIVE"
-                ? "bg-red-500 text-white"
-                : "bg-white/90 text-zinc-500 hover:text-red-600"
-            } shadow-sm`}
-            title="Needs work"
-          >
-            👎
-          </button>
-        </div>
-      )}
-
-      <div className="aspect-square relative bg-zinc-100">
-        {isVideo ? (
-          <>
-            <img
-              src={`/api/immich/thumbnail/${asset.id}`}
-              alt={asset.originalFileName}
-              loading="lazy"
-              onLoad={() => setLoaded(true)}
-              className={`w-full h-full object-cover transition-opacity duration-300 ${
-                loaded ? "opacity-100" : "opacity-0"
-              }`}
-            />
-            <div className="absolute inset-0 flex items-center justify-center">
-              <svg className="w-12 h-12 text-white/90 drop-shadow-lg" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            </div>
-            <div className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-0.5 rounded">
-              VIDEO
-            </div>
-          </>
-        ) : (
-          <img
-            src={`/api/immich/thumbnail/${asset.id}`}
-            alt={asset.originalFileName}
-            loading="lazy"
-            onLoad={() => setLoaded(true)}
-            className={`w-full h-full object-cover transition-opacity duration-300 ${
-              loaded ? "opacity-100" : "opacity-0"
-            }`}
-          />
-        )}
-      </div>
-      {/* Delete button overlay on hover */}
-      {!selectionMode && onDelete && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          className="absolute top-1 right-1 z-10 w-6 h-6 rounded-full bg-red-500/80 hover:bg-red-600 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-          title="Remove media"
-        >
-          ✕
-        </button>
-      )}
-      <div className="p-2">
-        <p className="text-xs text-zinc-500 truncate" title={asset.originalFileName}>
-          {asset.originalFileName}
-        </p>
-        <p className="text-xs text-zinc-400 mt-0.5">
-          {new Date(asset.fileCreatedAt).toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-          })}
-        </p>
-        {/* Quality warning badges (US-004) */}
-        {qualityFlags && qualityFlags.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1.5">
-            {qualityFlags.map((flag, i) => (
-              <span
-                key={i}
-                className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200"
-                title="This asset may need review"
-              >
-                ⚠ {flag}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-    </div>
-  );
-}
-
-function OutputOption({
-  title,
-  description,
-  icon,
-  selected,
-  onClick,
-}: {
-  title: string;
-  description: string;
-  icon: string;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`w-full text-left p-4 rounded-lg border-2 transition-all ${
-        selected
-          ? "border-[var(--accent)] bg-blue-50"
-          : "border-zinc-200 hover:border-zinc-300"
-      }`}
-    >
-      <div className="flex items-start gap-3">
-        <span className="text-2xl">{icon}</span>
-        <div>
-          <h3 className="font-semibold text-zinc-900">{title}</h3>
-          <p className="text-sm text-zinc-500 mt-0.5">{description}</p>
-        </div>
-      </div>
-    </button>
   );
 }
