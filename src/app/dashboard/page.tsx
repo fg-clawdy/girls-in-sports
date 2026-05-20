@@ -1,261 +1,345 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+
+interface JobItem {
+  id: string;
+  type: string;
+  status: string;
+  attempts: number;
+  maxAttempts: number;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  retryAfter: string | null;
+  parentJobId: string | null;
+}
 
 interface EventItem {
   id: string;
   name: string;
   sport: string;
-  city: string;
-  eventDate: string;
-  description: string | null;
-  immichAlbumId: string | null;
-  thumbnailUrl: string | null;
+  status: string;
   createdAt: string;
 }
 
+interface CampaignItem {
+  id: string;
+  eventId: string;
+  name: string;
+  status: string;
+  createdAt: string;
+}
+
+const POLL_INTERVAL = 5000;
+
+const JOB_TYPE_LABELS: Record<string, string> = {
+  INGEST_CLIP: "Scene Detection",
+  SCORE_CLIP: "AI Scoring",
+  DIRECT_SCRIPT: "Script Generation",
+  GENERATE_MUSIC: "Music Generation",
+  RENDER_PROXY: "Proxy Render",
+  RENDER_FINAL: "Final Render",
+};
+
+const STAGE_ORDER = ["UPLOADING", "INGESTING", "READY", "DIRECTING", "SCRIPTED", "PROXY_READY", "APPROVED", "RENDERING", "DONE"];
+
+function getStageIndex(status: string): number {
+  return STAGE_ORDER.indexOf(status);
+}
+
+function getPipelineStages(eventStatus: string, campaign?: CampaignItem) {
+  const stages: { label: string; status: "pending" | "active" | "complete"; url?: string }[] = [
+    { label: "Upload", status: eventStatus === "UPLOADING" ? "active" : getStageIndex(eventStatus) > getStageIndex("UPLOADING") ? "complete" : "pending" },
+    { label: "Ingest", status: eventStatus === "INGESTING" ? "active" : getStageIndex(eventStatus) > getStageIndex("INGESTING") ? "complete" : "pending" },
+    { label: "Curate", status: eventStatus === "READY" ? "active" : getStageIndex(eventStatus) > getStageIndex("READY") ? "complete" : "pending" },
+  ];
+
+  if (campaign) {
+    stages.push(
+      { label: "Direct", status: campaign.status === "DIRECTING" ? "active" : getStageIndex(campaign.status) > getStageIndex("DIRECTING") ? "complete" : "pending" },
+      { label: "Draft", status: campaign.status === "PROXY_READY" ? "active" : getStageIndex(campaign.status) > getStageIndex("PROXY_READY") ? "complete" : "pending", url: `/campaigns/${campaign.id}/preview` },
+      { label: "Final", status: campaign.status === "DONE" ? "complete" : campaign.status === "RENDERING" ? "active" : "pending", url: campaign.status === "DONE" ? `/campaigns/${campaign.id}/download` : undefined },
+    );
+  }
+
+  return stages;
+}
+
 export default function DashboardPage() {
+  const [jobs, setJobs] = useState<JobItem[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [campaigns, setCampaigns] = useState<CampaignItem[]>([]);
+  const [workerHealthy, setWorkerHealthy] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showModal, setShowModal] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState("");
-  const [form, setForm] = useState({
-    name: "",
-    sport: "",
-    city: "",
-    eventDate: "",
-    description: "",
-  });
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
 
-  async function loadEvents() {
-    setLoading(true);
+  const hasActiveJobs = jobs.some(
+    (j) => j.status === "QUEUED" || j.status === "RUNNING" || j.status === "RETRYING"
+  );
+
+  const fetchDashboard = useCallback(async () => {
     try {
-      const res = await fetch("/api/events");
+      const res = await fetch("/api/jobs/status");
+      if (!res.ok) throw new Error("Failed to load dashboard");
       const data = await res.json();
-      if (data.events) {
-        setEvents(data.events);
-      }
+      setJobs(data.jobs || []);
+      setEvents(data.events || []);
+      setCampaigns(data.campaigns || []);
+      setWorkerHealthy(data.workerHealthy ?? false);
       setError("");
     } catch {
-      setError("Failed to load events");
+      setError("Failed to load dashboard data");
     } finally {
       setLoading(false);
     }
-  }
-
-  useEffect(() => {
-    loadEvents();
   }, []);
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setCreating(true);
-    setCreateError("");
+  useEffect(() => {
+    fetchDashboard();
+    const interval = setInterval(() => {
+      fetchDashboard();
+    }, POLL_INTERVAL);
+    return () => clearInterval(interval);
+  }, [fetchDashboard]);
+
+  const handleRetry = async (jobId: string) => {
+    setRetryingJobId(jobId);
     try {
-      const res = await fetch("/api/events", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setCreateError(data.error || "Failed to create event");
-        setCreating(false);
-        return;
-      }
-      setShowModal(false);
-      setForm({ name: "", sport: "", city: "", eventDate: "", description: "" });
-      await loadEvents();
+      const res = await fetch(`/api/jobs/${jobId}/retry`, { method: "POST" });
+      if (!res.ok) throw new Error("Retry failed");
+      await fetchDashboard();
     } catch {
-      setCreateError("Network error");
+      setError("Failed to retry job");
     } finally {
-      setCreating(false);
+      setRetryingJobId(null);
     }
-  }
+  };
+
+  const formatDuration = (startedAt: string | null) => {
+    if (!startedAt) return "—";
+    const diff = Date.now() - new Date(startedAt).getTime();
+    const mins = Math.floor(diff / 60000);
+    const secs = Math.floor((diff % 60000) / 1000);
+    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "QUEUED":
+        return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-zinc-100 text-zinc-600">Queued</span>;
+      case "RUNNING":
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+            Running
+          </span>
+        );
+      case "RETRYING":
+        return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700">Retrying</span>;
+      case "DONE":
+        return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-50 text-emerald-700">Done</span>;
+      case "FAILED":
+        return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-50 text-red-700">Failed</span>;
+      default:
+        return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-zinc-100 text-zinc-600">{status}</span>;
+    }
+  };
 
   return (
     <div className="min-h-screen bg-zinc-50">
       <header className="bg-white border-b border-zinc-200 px-6 py-4">
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold text-zinc-900">Girls In Sports</h1>
-            <p className="text-sm text-zinc-500">Media Catalog & Marketing Composer</p>
+            <h1 className="text-xl font-bold text-zinc-900">Dashboard</h1>
+            <p className="text-sm text-zinc-500">Pipeline status & active jobs</p>
           </div>
           <div className="flex items-center gap-4">
-            <Link href="/results" className="text-sm text-zinc-600 hover:text-zinc-900">
-              Results Catalog
+            <Link href="/" className="text-sm text-zinc-600 hover:text-zinc-900">
+              Events
             </Link>
-            <form action="/api/auth/logout" method="POST">
-              <button
-                type="submit"
-                className="text-sm text-zinc-600 hover:text-zinc-900"
-              >
-                Log Out
-              </button>
-            </form>
+            <Link href="/results" className="text-sm text-zinc-600 hover:text-zinc-900">
+              Results
+            </Link>
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 py-8">
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-semibold text-zinc-900">Events</h2>
-          <button
-            onClick={() => setShowModal(true)}
-            className="px-4 py-2 bg-[var(--accent)] text-white text-sm font-medium rounded-md hover:bg-[var(--accent-hover)]"
-          >
-            + New Event
-          </button>
-        </div>
-
-        {loading && (
-          <p className="text-zinc-500">Loading events...</p>
+      <main className="max-w-5xl mx-auto px-6 py-6 space-y-6">
+        {/* Worker health banner */}
+        {!workerHealthy && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-start gap-3">
+            <svg className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div>
+              <p className="text-sm font-medium text-amber-800">Background worker is offline</p>
+              <p className="text-xs text-amber-700 mt-0.5">Jobs are paused. Run: <code className="bg-amber-100 px-1 py-0.5 rounded">npm run worker</code></p>
+            </div>
+          </div>
         )}
+
+        {/* Pipeline progress per event */}
+        <section>
+          <h2 className="text-sm font-semibold text-zinc-800 mb-3">Production Pipeline</h2>
+          {events.length === 0 && !loading ? (
+            <p className="text-sm text-zinc-400">No events yet.</p>
+          ) : (
+            <div className="space-y-3">
+              {events.map((event) => {
+                const eventCampaigns = campaigns.filter((c) => c.eventId === event.id);
+                const campaign = eventCampaigns[0]; // Show most recent campaign
+                const stages = getPipelineStages(event.status, campaign);
+
+                return (
+                  <div key={event.id} className="bg-white rounded-lg border border-zinc-200 p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-zinc-900">{event.name}</h3>
+                        <p className="text-xs text-zinc-500">{event.sport} &middot; {new Date(event.createdAt).toLocaleDateString()}</p>
+                      </div>
+                      {campaign && (
+                        <span className="text-xs text-zinc-400">{campaign.name}</span>
+                      )}
+                    </div>
+
+                    {/* Stage bar */}
+                    <div className="flex items-center gap-1">
+                      {stages.map((stage, idx) => {
+                        const clickable = stage.url && (stage.status === "complete" || stage.status === "active");
+
+                        return (
+                          <div key={idx} className="flex items-center gap-1 flex-1">
+                            {clickable ? (
+                              <Link href={stage.url!} className="block flex-1">
+                                <div
+                                  className={`w-full h-2 rounded-full transition-colors ${
+                                    stage.status === "complete"
+                                      ? "bg-emerald-400"
+                                      : stage.status === "active"
+                                      ? "bg-blue-400"
+                                      : "bg-zinc-200"
+                                  }`}
+                                  title={`${stage.label}: ${stage.status}`}
+                                />
+                              </Link>
+                            ) : (
+                              <div className="block flex-1">
+                                <div
+                                  className={`w-full h-2 rounded-full transition-colors ${
+                                    stage.status === "complete"
+                                      ? "bg-emerald-400"
+                                      : stage.status === "active"
+                                      ? "bg-blue-400"
+                                      : "bg-zinc-200"
+                                  }`}
+                                  title={`${stage.label}: ${stage.status}`}
+                                />
+                              </div>
+                            )}
+                            {idx < stages.length - 1 && (
+                              <div className="w-3 h-px bg-zinc-200 shrink-0" />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex justify-between mt-1.5">
+                      {stages.map((stage, idx) => (
+                        <span key={idx} className="flex-1 text-[10px] text-zinc-400 text-center truncate">
+                          {stage.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* Active jobs table */}
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-zinc-800">Active Jobs</h2>
+            {hasActiveJobs && (
+              <span className="inline-flex items-center gap-1 text-xs text-blue-600">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                Polling every 5s
+              </span>
+            )}
+          </div>
+
+          {loading ? (
+            <p className="text-sm text-zinc-500">Loading...</p>
+          ) : jobs.length === 0 ? (
+            <div className="bg-white rounded-lg border border-zinc-200 p-8 text-center">
+              <p className="text-sm text-zinc-500">No active jobs.</p>
+              <p className="text-xs text-zinc-400 mt-1">All background work is complete.</p>
+            </div>
+          ) : (
+            <div className="bg-white rounded-lg border border-zinc-200 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-zinc-50 border-b border-zinc-200">
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Type</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Status</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Elapsed</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Attempts</th>
+                      <th className="text-left px-4 py-2 text-xs font-medium text-zinc-500">Error</th>
+                      <th className="text-right px-4 py-2 text-xs font-medium text-zinc-500">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100">
+                    {jobs.map((job) => (
+                      <tr key={job.id} className="hover:bg-zinc-50 transition-colors">
+                        <td className="px-4 py-3 text-zinc-700 font-medium">
+                          {JOB_TYPE_LABELS[job.type] || job.type}
+                        </td>
+                        <td className="px-4 py-3">{getStatusBadge(job.status)}</td>
+                        <td className="px-4 py-3 text-zinc-500">
+                          {job.status === "RUNNING" ? formatDuration(job.startedAt) : "—"}
+                        </td>
+                        <td className="px-4 py-3 text-zinc-500">
+                          {job.attempts}/{job.maxAttempts}
+                        </td>
+                        <td className="px-4 py-3">
+                          {job.error ? (
+                            <span className="text-xs text-red-600 truncate max-w-[200px] block" title={job.error}>
+                              {job.error.slice(0, 80)}{job.error.length > 80 ? "..." : ""}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-300">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {job.status === "FAILED" || job.status === "RETRYING" ? (
+                            <button
+                              onClick={() => handleRetry(job.id)}
+                              disabled={retryingJobId === job.id}
+                              className="text-xs px-3 py-1.5 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium disabled:opacity-40 transition-colors"
+                            >
+                              {retryingJobId === job.id ? "Retrying..." : "Retry"}
+                            </button>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
 
         {error && (
-          <p className="text-red-600">{error}</p>
+          <p className="text-sm text-red-600">{error}</p>
         )}
-
-        {!loading && events.length === 0 && (
-          <div className="bg-white rounded-lg border border-zinc-200 p-8 text-center">
-            <p className="text-zinc-500 mb-2">No events yet.</p>
-            <p className="text-sm text-zinc-400">
-              Create an event to start cataloging media from your camps.
-            </p>
-          </div>
-        )}
-
-        <div className="grid gap-4">
-          {events.map((event) => (
-            <Link
-              key={event.id}
-              href={`/events/${event.id}`}
-              className="block bg-white rounded-lg border border-zinc-200 overflow-hidden hover:shadow-md transition-shadow"
-            >
-              {event.thumbnailUrl && (
-                <div className="w-full h-40 bg-zinc-100 overflow-hidden relative">
-                  <img
-                    src={event.thumbnailUrl}
-                    alt={`${event.name} thumbnail`}
-                    className="w-full h-full object-cover"
-                  />
-                </div>
-              )}
-              <div className="p-5">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h3 className="font-semibold text-zinc-900">{event.name}</h3>
-                    <p className="text-sm text-zinc-500 mt-1">
-                      {event.sport} &middot; {event.city} &middot;{" "}
-                      {new Date(event.eventDate).toLocaleDateString("en-US", {
-                        month: "long",
-                        day: "numeric",
-                        year: "numeric",
-                      })}
-                    </p>
-                    {event.description && (
-                      <p className="text-sm text-zinc-600 mt-2">{event.description}</p>
-                    )}
-                  </div>
-                  {event.immichAlbumId && (
-                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 shrink-0">
-                      Immich
-                    </span>
-                  )}
-                </div>
-              </div>
-            </Link>
-          ))}
-        </div>
       </main>
-
-      {/* Create Event Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
-            <h3 className="text-lg font-semibold text-zinc-900 mb-4">Create New Event</h3>
-            <form onSubmit={handleCreate} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 mb-1">Event Name</label>
-                <input
-                  required
-                  type="text"
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-                  placeholder="e.g. Summer Camp 2026"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 mb-1">Sport</label>
-                <input
-                  required
-                  type="text"
-                  value={form.sport}
-                  onChange={(e) => setForm({ ...form, sport: e.target.value })}
-                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-                  placeholder="e.g. Soccer, Basketball"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 mb-1">City</label>
-                <input
-                  required
-                  type="text"
-                  value={form.city}
-                  onChange={(e) => setForm({ ...form, city: e.target.value })}
-                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-                  placeholder="e.g. Atlanta"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 mb-1">Event Date</label>
-                <input
-                  required
-                  type="date"
-                  value={form.eventDate}
-                  onChange={(e) => setForm({ ...form, eventDate: e.target.value })}
-                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 mb-1">Description</label>
-                <textarea
-                  rows={3}
-                  value={form.description}
-                  onChange={(e) => setForm({ ...form, description: e.target.value })}
-                  className="w-full px-3 py-2 border border-zinc-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-                  placeholder="Optional notes about the event..."
-                />
-              </div>
-
-              {createError && (
-                <p className="text-sm text-red-600">{createError}</p>
-              )}
-
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-900"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={creating}
-                  className="px-4 py-2 bg-[var(--accent)] text-white text-sm font-medium rounded-md hover:bg-[var(--accent-hover)] disabled:opacity-50"
-                >
-                  {creating ? "Creating..." : "Create Event"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
