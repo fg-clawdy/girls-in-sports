@@ -37,6 +37,17 @@ export async function GET(
         : null,
     ]);
 
+    // Fetch active jobs for this campaign
+    const jobs = await prisma.job.findMany({
+      where: {
+        payload: { path: ["campaignId"], equals: params.id },
+        status: { in: ["QUEUED", "RUNNING", "RETRYING", "FAILED"] },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+      select: { id: true, type: true, status: true, attempts: true, maxAttempts: true, error: true, createdAt: true },
+    });
+
     // Build video URLs from Immich via proxy routes
     const proxyVideoUrl = proxyAsset?.immichAssetId
       ? `/api/immich/assets/${proxyAsset.immichAssetId}`
@@ -75,6 +86,7 @@ export async function GET(
         finalVideoUrl,
       },
       clips,
+      jobs,
     });
   } catch (error) {
     console.error("GET /campaigns/[id] error:", error);

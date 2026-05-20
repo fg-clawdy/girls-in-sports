@@ -2,13 +2,23 @@ import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 
-const connectionString = process.env.DATABASE_URL;
+let _prisma: PrismaClient | null = null;
 
-const pool = new Pool({ connectionString });
-const adapter = new PrismaPg(pool);
+export function getPrisma(): PrismaClient {
+  if (!_prisma) {
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const adapter = new PrismaPg(pool);
+    _prisma = new PrismaClient({ adapter });
+  }
+  return _prisma;
+}
 
-const globalForPrisma = global as unknown as { prisma: PrismaClient };
-
-export const prisma = globalForPrisma.prisma || new PrismaClient({ adapter });
-
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+// Lazy proxy — does NOT create PrismaClient until first property access.
+// Critical: this module may be imported by worker.ts BEFORE dotenv.config() runs.
+// The Pool must not be created until env vars are actually loaded.
+export const prisma = new Proxy({} as PrismaClient, {
+  get(_target, prop) {
+    const client = getPrisma();
+    return (client as any)[prop];
+  },
+});

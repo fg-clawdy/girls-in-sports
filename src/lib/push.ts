@@ -1,5 +1,5 @@
 import * as webPush from "web-push";
-import { prisma } from "./prisma";
+import { getPrisma } from "./prisma";
 
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
@@ -32,7 +32,7 @@ export async function sendPushNotification(
     return { sent: 0, failed: 0 };
   }
 
-  const subscriptions = await prisma.pushSubscription.findMany({
+  const subscriptions = await getPrisma().pushSubscription.findMany({
     where: userId ? { userId } : {},
   });
 
@@ -58,7 +58,7 @@ export async function sendPushNotification(
 
       // Remove invalid subscriptions
       if (err instanceof Error && err.message.includes("expired")) {
-        await prisma.pushSubscription.delete({ where: { id: sub.id } });
+        await getPrisma().pushSubscription.delete({ where: { id: sub.id } });
       }
     }
   }
