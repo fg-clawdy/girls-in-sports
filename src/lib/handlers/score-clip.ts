@@ -99,10 +99,25 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     // ── 8. Assign clipType ──
     const clipType = assignClipType(motionScore, audioScore);
 
-    // ── 9. Create ClipScore record ──
-    await prisma.clipScore.create({
-      data: {
+    // ── 9. Upsert ClipScore record (allows re-runs) ──
+    await prisma.clipScore.upsert({
+      where: { assetId },
+      create: {
         assetId,
+        visionScore: Math.round(visionScore),
+        audioScore: Math.round(audioScore),
+        motionScore: Math.round(motionScore),
+        compositeScore: composite,
+        clipType,
+        hasFaces,
+        hasCoachSpeech,
+        hasActionKeyword: keywordHits.some((k) =>
+          ["shoot", "shot", "goal", "score", "spike", "block", "save", "tackle"].includes(k)
+        ),
+        transcriptExcerpt: transcript.slice(0, 200),
+        keywordHits: JSON.stringify(keywordHits),
+      },
+      update: {
         visionScore: Math.round(visionScore),
         audioScore: Math.round(audioScore),
         motionScore: Math.round(motionScore),
