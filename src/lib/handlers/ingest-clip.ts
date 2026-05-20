@@ -120,13 +120,13 @@ export async function handleIngestClip(payload: unknown): Promise<void> {
         await prisma.job.create({
           data: {
             type: "SCORE_CLIP",
-            payload: JSON.stringify({
+            payload: {
               assetId: clipAsset.id,
               immichAssetId: uploadedImmichId,
               eventId,
               eventName: pl.eventName,
               parentJobId: null,
-            }),
+            },
             status: "QUEUED",
             attempts: 0,
             maxAttempts: 3,
@@ -138,13 +138,13 @@ export async function handleIngestClip(payload: unknown): Promise<void> {
       await prisma.job.create({
         data: {
           type: "SCORE_CLIP",
-          payload: JSON.stringify({
+          payload: {
             assetId,
             immichAssetId,
             eventId,
             eventName: pl.eventName,
             parentJobId: null,
-          }),
+          },
           status: "QUEUED",
           attempts: 0,
           maxAttempts: 3,

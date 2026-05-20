@@ -90,7 +90,17 @@ async function processJob(job: {
     throw new Error(`No handler registered for job type: ${job.type}`);
   }
 
-  await handler({ payload: job.payload, jobId: job.id });
+  // Defensive: legacy double-encoded string payloads (ingest-clip.ts used JSON.stringify before fix)
+  let payload = job.payload;
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      // leave as-is if unparseable
+    }
+  }
+
+  await handler({ payload, jobId: job.id });
 }
 
 async function markDone(jobId: string, jobType: JobType, payload: unknown) {

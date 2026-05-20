@@ -200,36 +200,70 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
   }
 }
 
-// ── STT: Send raw video to Venice /audio/transcriptions ──
+// ── STT: Extract audio then send to Venice /audio/transcriptions ──
 async function transcribeVideo(videoPath: string): Promise<{
   transcript: string;
   segments: Array<{ start: number; end: number; text: string }>;
 }> {
-  const buf = readFileSync(videoPath);
-  const form = new FormData();
-  form.append("file", new Blob([buf], { type: "video/mp4" }), "clip.mp4");
-  form.append("model", "openai/whisper-large-v3");
-  form.append("response_format", "verbose_json");
+  // Extract audio to MP3 for reliable STT ingestion
+  const audioPath = videoPath + ".mp3";
+  await extractAudioToMp3(videoPath, audioPath);
 
-  const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${VENICE_API_KEY}` },
-    body: form as any,
-  });
+  try {
+    const buf = readFileSync(audioPath);
+    const form = new FormData();
+    form.append("file", new Blob([buf], { type: "audio/mp3" }), "audio.mp3");
+    form.append("model", "openai/whisper-large-v3");
+    form.append("response_format", "json");
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`STT failed: ${res.status} ${text}`);
+    const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${VENICE_API_KEY}` },
+      body: form as any,
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`STT failed: ${res.status} ${text}`);
+    }
+
+    const data = await res.json();
+    const text = data.text || "";
+
+    // Venice json mode returns just text — create a single segment
+    return {
+      transcript: text,
+      segments: text
+        ? [{ start: 0, end: 0, text }]
+        : [],
+    };
+  } finally {
+    try {
+      await fs.unlink(audioPath);
+    } catch {
+      // ignore cleanup
+    }
   }
+}
 
-  const data = await res.json();
-  const segments = (data.segments || []).map((s: any) => ({
-    start: s.start ?? 0,
-    end: s.end ?? 0,
-    text: s.text ?? "",
-  }));
-
-  return { transcript: data.text || "", segments };
+async function extractAudioToMp3(videoPath: string, audioPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("ffmpeg", [
+      "-i", videoPath,
+      "-vn",
+      "-ar", "16000",
+      "-ac", "1",
+      "-b:a", "32k",
+      "-y",
+      audioPath,
+    ]);
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Audio extraction failed: ${stderr.slice(-500)}`));
+    });
+  });
 }
 
 // ── Audio score computation ──
