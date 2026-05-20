@@ -249,8 +249,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-20. /campaigns/[id]/download page: video player, Download MP4 button (streams with Content-Disposition: attachment), Copy Share Link (JWT HS256, 72h expiry), post-render feedback widget (productionWorthy, overallRating 1-5, musicSatisfied, wouldChange) stored to CampaignFeedback table + merged into userFeedbackJson, metadata summary (duration, clips, format, energy, resolution, codec, music, source), Create Another Campaign button. /api/campaigns/[id]/download, /share, /feedback, /create-another routes. Fixed preview page start-over navigation. Commit: 77c1c5e."
     },
     {
       "id": "US-014",
