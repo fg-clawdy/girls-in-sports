@@ -5,10 +5,16 @@ import { Pool } from "pg";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { sendPushNotification } from "./push";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
+let _prisma: PrismaClient | null = null;
 
-const prisma = new PrismaClient({ adapter });
+function getPrisma(): PrismaClient {
+  if (!_prisma) {
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const adapter = new PrismaPg(pool);
+    _prisma = new PrismaClient({ adapter });
+  }
+  return _prisma;
+}
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_RETRY_DELAY_MS = 60000;
@@ -28,7 +34,7 @@ export async function enqueueJob(
   payload: Record<string, unknown> | unknown[],
   parentJobId?: string
 ) {
-  const job = await prisma.job.create({
+  const job = await getPrisma().job.create({
     data: {
       type,
       payload: JSON.parse(JSON.stringify(payload)),
@@ -46,7 +52,7 @@ export async function enqueueJob(
 async function claimNextJob() {
   // Claim atomically using raw query to avoid race conditions
   const now = new Date().toISOString();
-  const result = await prisma.$queryRaw<Array<{
+  const result = await getPrisma().$queryRaw<Array<{
     id: string;
     type: string;
     payload: unknown;
@@ -88,7 +94,7 @@ async function processJob(job: {
 }
 
 async function markDone(jobId: string, jobType: JobType, payload: unknown) {
-  await prisma.job.update({
+  await getPrisma().job.update({
     where: { id: jobId },
     data: {
       status: JobStatus.DONE,
@@ -117,7 +123,7 @@ async function markDone(jobId: string, jobType: JobType, payload: unknown) {
       case JobType.SCORE_CLIP:
         // Only notify when all clips scored — check via parentJobId
         if (pl.parentJobId) {
-          const pending = await prisma.job.count({
+          const pending = await getPrisma().job.count({
             where: {
               parentJobId: pl.parentJobId as string,
               status: { not: JobStatus.DONE },
@@ -162,7 +168,7 @@ async function markFailed(jobId: string, error: string, attempts: number, maxAtt
   );
   const retryAfter = new Date(Date.now() + delayMs);
 
-  await prisma.job.update({
+  await getPrisma().job.update({
     where: { id: jobId },
     data: shouldRetry
       ? {
@@ -210,7 +216,7 @@ export async function startWorker() {
   }
 
   console.log("[worker] Shutting down...");
-  await prisma.$disconnect();
+  await getPrisma().$disconnect();
 }
 
 export function stopWorker() {
@@ -223,12 +229,12 @@ export function startHealthServer(port = 3011) {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (req.url === "/health" && req.method === "GET") {
       try {
-        const queueDepth = await prisma.job.count({
+        const queueDepth = await getPrisma().job.count({
           where: {
             status: { in: [JobStatus.QUEUED, JobStatus.RETRYING] },
           },
         });
-        const runningJobs = await prisma.job.count({
+        const runningJobs = await getPrisma().job.count({
           where: { status: JobStatus.RUNNING },
         });
 

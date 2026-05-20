@@ -13,7 +13,7 @@
     "db:seed": "ts-node prisma/seed.ts",
     "db:reset": "prisma migrate reset --force",
     "typecheck": "tsc --noEmit",
-    "worker": "ts-node src/scripts/worker.ts"
+    "worker": "tsx src/scripts/worker.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",

@@ -3,6 +3,9 @@
 // Run: npx ts-node src/scripts/worker.ts
 // Or after build: node dist/scripts/worker.js
 
+import { config } from "dotenv";
+config();
+
 import {
   startWorker,
   startHealthServer,
