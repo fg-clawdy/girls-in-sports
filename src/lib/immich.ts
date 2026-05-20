@@ -236,3 +236,144 @@ export async function updateAssetDescription(
     throw new Error(`Immich update description failed: ${res.status} ${await res.text()}`);
   }
 }
+
+// ── Tag Sync ──────────────────────────────────────────────────
+
+/**
+ * Write GIS tags to Immich asset description as newline-separated key:value pairs.
+ * This makes tags visible in Immich UI without relying on Immich's tag system.
+ */
+export async function syncTagsToImmich(
+  assetId: string,
+  tags: string[]
+): Promise<void> {
+  if (!IMMICH_KEY) {
+    console.warn("[immich] syncTagsToImmich: no API key configured");
+    return;
+  }
+
+  const existing = await getAssetInfo(assetId);
+  const existingDesc = existing.exifInfo?.description || "";
+
+  // Parse existing gis: tags from description
+  const lines = existingDesc.split("\n").filter(Boolean);
+  const nonGisLines = lines.filter((l) => !l.startsWith("gis:"));
+
+  const gisLines = tags.map((t) => `gis:${t}`);
+  const newDescription = [...nonGisLines, ...gisLines].join("\n");
+
+  await updateAssetDescription(assetId, newDescription);
+  console.log(`[immich] Synced ${tags.length} tags to asset ${assetId}`);
+}
+
+/**
+ * Query GIS AssetTag table for assets matching all provided tags.
+ * This is the source-of-truth for tag-based filtering — never queries Immich.
+ */
+export async function searchAssetsByTag(
+  tags: string[],
+  eventId?: string
+): Promise<string[]> {
+  const { prisma } = await import("@/lib/prisma");
+
+  const conditions: any[] = tags.map((tag) => ({
+    assetTags: { some: { tag } },
+  }));
+
+  if (eventId) {
+    conditions.push({ eventId });
+  }
+
+  const assets = await prisma.asset.findMany({
+    where: { AND: conditions },
+    select: { id: true, immichAssetId: true },
+  });
+
+  return assets.map((a) => a.id);
+}
+
+/**
+ * Pull tags from Immich asset descriptions back into GIS AssetTag table.
+ * Parses `gis:` prefixed key:value pairs from descriptions.
+ */
+export async function syncTagsFromImmich(eventId: string): Promise<number> {
+  const { prisma } = await import("@/lib/prisma");
+
+  const assets = await prisma.asset.findMany({
+    where: { eventId, immichAssetId: { not: null } },
+    select: { id: true, immichAssetId: true },
+  });
+
+  let syncedCount = 0;
+
+  for (const asset of assets) {
+    if (!asset.immichAssetId) continue;
+    try {
+      const info = await getAssetInfo(asset.immichAssetId);
+      const desc = info.exifInfo?.description || "";
+      const gisTags = desc
+        .split("\n")
+        .filter((l) => l.startsWith("gis:"))
+        .map((l) => l.replace("gis:", "").trim())
+        .filter(Boolean);
+
+      for (const tag of gisTags) {
+        await prisma.assetTag.upsert({
+          where: { assetId_tag: { assetId: asset.id, tag } },
+          create: {
+            assetId: asset.id,
+            tag,
+            source: "IMMICH_CLIP",
+            confidence: null,
+          },
+          update: {},
+        });
+        syncedCount++;
+      }
+    } catch (err) {
+      console.warn(`[immich] syncTagsFromImmich failed for asset ${asset.id}:`, err);
+    }
+  }
+
+  console.log(`[immich] Synced ${syncedCount} tags from Immich for event ${eventId}`);
+  return syncedCount;
+}
+
+/**
+ * Proxy Immich CLIP smart search. Returns GIS Asset IDs matching the query.
+ */
+export async function smartSearchImmich(
+  query: string,
+  eventId?: string
+): Promise<string[]> {
+  if (!IMMICH_KEY) {
+    throw new Error("Immich not configured");
+  }
+
+  const res = await fetch(`${IMMICH_URL}/api/search/smart`, {
+    method: "POST",
+    headers: getHeaders(),
+    body: JSON.stringify({ query, clip: true }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Immich smart search failed: ${res.status}`);
+  }
+
+  const data = await res.json();
+  const immichIds: string[] = (data.assets?.items || []).map((item: any) => item.id);
+
+  if (immichIds.length === 0) return [];
+
+  // Resolve immichAssetIds back to GIS Asset records
+  const { prisma } = await import("@/lib/prisma");
+  const conditions: any = { immichAssetId: { in: immichIds } };
+  if (eventId) conditions.eventId = eventId;
+
+  const assets = await prisma.asset.findMany({
+    where: conditions,
+    select: { id: true },
+  });
+
+  return assets.map((a) => a.id);
+}
