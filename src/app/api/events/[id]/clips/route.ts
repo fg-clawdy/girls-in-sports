@@ -16,7 +16,10 @@ export async function GET(
     const clips = await prisma.asset.findMany({
       where: {
         eventId: params.id,
-        type: "CLIP",
+        OR: [
+          { type: "CLIP" },
+          { type: "SOURCE_VIDEO", status: "SCORED" },
+        ],
         status: "SCORED",
       },
       include: {
