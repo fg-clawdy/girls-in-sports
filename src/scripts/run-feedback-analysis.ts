@@ -2,6 +2,9 @@
 // Standalone script for cron job: runs feedback analysis
 // Usage: npx ts-node src/scripts/run-feedback-analysis.ts
 
+import { config } from "dotenv";
+config({ path: ".env.local" });
+
 import { runFeedbackAnalysis } from "../lib/feedback-analysis";
 
 async function main() {
