@@ -300,8 +300,8 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": "VAPID keys are required for Web Push. Generate them once with `web-push generate-vapid-keys` and store in .env."
+      "passes": true,
+      "notes": "Implemented 2026-05-20. next.config.mjs: experimental.serverComponentsExternalPackages for sharp/fluent-ffmpeg, security headers (X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy, CSP with self + Immich origin, Permissions-Policy), output: standalone. src/lib/env.ts: Zod schema validates all required env vars at startup. src/middleware.ts: token bucket rate limiter (60 req/min default, 10 req/min uploads), periodic cleanup, security headers on all /api/* routes. Commit: 266679a."
     },
     {
       "id": "US-017",
