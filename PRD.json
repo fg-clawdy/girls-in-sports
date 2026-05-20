@@ -267,8 +267,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-20. /dashboard redesigned: pipeline progress bars per event (Upload → Ingest → Curate → Direct → Draft → Final), color-coded complete/active/pending segments, clickable stages navigate to curate/preview/download. Active jobs table with human-readable type labels, status badges (pulsing for RUNNING), elapsed time, attempt count, truncated error messages, Retry button. Worker health banner polls localhost:3011/health, shows amber alert with 'npm run worker' hint when unreachable. Auto-polls /api/jobs/status every 5s when active jobs exist. Commit: 53956ae."
     },
     {
       "id": "US-015",
