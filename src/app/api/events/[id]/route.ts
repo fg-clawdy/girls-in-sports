@@ -31,7 +31,7 @@ export async function PATCH(
 ) {
   try {
     const body = await request.json();
-    const { name, sport, city, eventDate, description } = body;
+    const { name, sport, city, eventDate, description, qualityTier } = body;
 
     const event = await prisma.event.update({
       where: { id: params.id },
@@ -41,6 +41,7 @@ export async function PATCH(
         ...(city !== undefined && { city }),
         ...(eventDate !== undefined && { eventDate: new Date(eventDate) }),
         ...(description !== undefined && { description }),
+        ...(qualityTier !== undefined && { qualityTier }),
       },
     });
 

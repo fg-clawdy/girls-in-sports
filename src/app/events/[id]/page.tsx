@@ -14,6 +14,7 @@ interface EventData {
   eventDate: string;
   description: string | null;
   immichAlbumId: string | null;
+  qualityTier: "AMATEUR" | "INTERMEDIATE" | "PROFESSIONAL";
 }
 
 interface ImmichAsset {
@@ -101,6 +102,16 @@ const JOB_TYPE_LABELS: Record<string, string> = {
 };
 
 const POLL_INTERVAL = 5000;
+
+const TIER_OPTIONS: { value: string; label: string; threshold: number; desc: string }[] = [
+  { value: "AMATEUR", label: "Amateur", threshold: 0, desc: "All clips visible" },
+  { value: "INTERMEDIATE", label: "Intermediate", threshold: 25, desc: "≥25 score" },
+  { value: "PROFESSIONAL", label: "Professional", threshold: 50, desc: "≥50 score" },
+];
+
+function getTierThreshold(tier: string): number {
+  return TIER_OPTIONS.find((t) => t.value === tier)?.threshold ?? 50;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -223,10 +234,10 @@ export default function EventPage() {
       if (!res.ok) throw new Error("Failed to load clips");
       const data = await res.json();
       setClips(data.clips || []);
-      // Default accept all with score >= 50
+      const threshold = getTierThreshold(data.event?.qualityTier ?? "PROFESSIONAL");
       const map: Record<string, boolean> = {};
       data.clips.forEach((c: ClipData) => {
-        map[c.id] = (c.clipScore?.compositeScore ?? 0) >= 50;
+        map[c.id] = (c.clipScore?.compositeScore ?? 0) >= threshold;
       });
       setAcceptedMap(map);
     } catch {
@@ -679,6 +690,39 @@ export default function EventPage() {
                 </select>
               </div>
 
+              {/* Quality Tier */}
+              <div>
+                <label className="text-sm font-medium text-zinc-700 block mb-1">Quality Tier</label>
+                <select
+                  value={event?.qualityTier ?? "PROFESSIONAL"}
+                  onChange={async (e) => {
+                    const newTier = e.target.value;
+                    try {
+                      const res = await fetch(`/api/events/${eventId}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ qualityTier: newTier }),
+                      });
+                      if (!res.ok) throw new Error("Failed to update tier");
+                      setEvent((prev) => prev ? { ...prev, qualityTier: newTier as any } : prev);
+                      await fetchClips();
+                    } catch {
+                      setError("Failed to update quality tier");
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-md border border-zinc-300 text-sm bg-white"
+                >
+                  {TIER_OPTIONS.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-400 mt-1">
+                  {TIER_OPTIONS.find((t) => t.value === (event?.qualityTier ?? "PROFESSIONAL"))?.desc}
+                </p>
+              </div>
+
               {/* Creative Brief */}
               <div className="bg-white rounded-lg border border-zinc-200 p-4 space-y-4">
                 <h3 className="font-semibold text-zinc-900">Creative Brief</h3>
@@ -755,7 +799,7 @@ export default function EventPage() {
                   onClick={selectAllAccepted}
                   className="px-3 py-1.5 rounded-md text-sm font-medium bg-white text-zinc-700 border border-zinc-200 hover:bg-zinc-50"
                 >
-                  Accept All ≥50
+                  Accept All
                 </button>
               </div>
 

@@ -409,7 +409,7 @@ export async function POST(request: Request) {
               if (frame) {
                 bestFrame = {
                   assetId: item.assetId,
-                  timestamp: item.timestamp,
+                  timestamp: item.timestamp ?? 0,
                   score: score.score,
                   imagePath: frame.imagePath,
                 };

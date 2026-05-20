@@ -13,6 +13,13 @@ export async function GET(
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
+    const tierThreshold: Record<string, number> = {
+      AMATEUR: 0,
+      INTERMEDIATE: 25,
+      PROFESSIONAL: 50,
+    };
+    const threshold = tierThreshold[event.qualityTier] ?? 50;
+
     const clips = await prisma.asset.findMany({
       where: {
         eventId: params.id,
@@ -21,6 +28,9 @@ export async function GET(
           { type: "SOURCE_VIDEO", status: "SCORED" },
         ],
         status: "SCORED",
+        clipScore: {
+          compositeScore: { gte: threshold },
+        },
       },
       include: {
         clipScore: true,
