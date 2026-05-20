@@ -62,6 +62,21 @@ export async function handleIngestClip(payload: unknown): Promise<void> {
       },
     });
 
+    // ── Look up asset type to handle images gracefully ──
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      select: { type: true },
+    });
+
+    // Images: skip scene detection and scoring entirely
+    if (asset?.type === "SOURCE_IMAGE") {
+      await prisma.asset.update({
+        where: { id: assetId },
+        data: { status: AssetStatus.UPLOADED },
+      });
+      return;
+    }
+
     // ── 4. Scene detection ──
     if (durationSeconds > 60) {
       const scenes = await detectScenes(sourcePath, durationSeconds);
