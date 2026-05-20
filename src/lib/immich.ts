@@ -2,14 +2,19 @@ import { createWriteStream } from "fs";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 
-const IMMICH_URL = process.env.IMMICH_API_URL || "http://localhost:2283";
-const IMMICH_KEY = process.env.IMMICH_API_KEY || "";
+function getImmichUrl(): string {
+  return process.env.IMMICH_API_URL || "http://localhost:2283";
+}
+
+function getImmichKey(): string {
+  return process.env.IMMICH_API_KEY || "";
+}
 
 function getHeaders() {
   return {
     Accept: "application/json",
     "Content-Type": "application/json",
-    "x-api-key": IMMICH_KEY,
+    "x-api-key": getImmichKey(),
   };
 }
 
@@ -65,7 +70,7 @@ export interface ImmichAsset {
 }
 
 export async function getAllAlbums(): Promise<ImmichAlbum[]> {
-  const res = await fetch(`${IMMICH_URL}/api/albums`, {
+  const res = await fetch(`${getImmichUrl()}/api/albums`, {
     headers: getHeaders(),
   });
   if (!res.ok) {
@@ -75,7 +80,7 @@ export async function getAllAlbums(): Promise<ImmichAlbum[]> {
 }
 
 export async function getAlbum(albumId: string): Promise<ImmichAlbum> {
-  const res = await fetch(`${IMMICH_URL}/api/albums/${albumId}?withoutAssets=false`, {
+  const res = await fetch(`${getImmichUrl()}/api/albums/${albumId}?withoutAssets=false`, {
     headers: getHeaders(),
     cache: "no-store",
   });
@@ -90,7 +95,7 @@ export async function createAlbum(
   description?: string,
   assetIds?: string[]
 ): Promise<ImmichAlbum> {
-  const res = await fetch(`${IMMICH_URL}/api/albums`, {
+  const res = await fetch(`${getImmichUrl()}/api/albums`, {
     method: "POST",
     headers: getHeaders(),
     body: JSON.stringify({
@@ -108,19 +113,19 @@ export async function createAlbum(
 // --- Assets ---
 
 export function getAssetThumbnailUrl(assetId: string): string {
-  return `${IMMICH_URL}/api/assets/${assetId}/thumbnail?size=thumbnail`;
+  return `${getImmichUrl()}/api/assets/${assetId}/thumbnail?size=thumbnail`;
 }
 
 export function getAssetPreviewUrl(assetId: string): string {
-  return `${IMMICH_URL}/api/assets/${assetId}/thumbnail?size=preview`;
+  return `${getImmichUrl()}/api/assets/${assetId}/thumbnail?size=preview`;
 }
 
 export function getAssetOriginalUrl(assetId: string): string {
-  return `${IMMICH_URL}/api/assets/${assetId}/original`;
+  return `${getImmichUrl()}/api/assets/${assetId}/original`;
 }
 
 export async function getAssetInfo(assetId: string): Promise<ImmichAsset> {
-  const res = await fetch(`${IMMICH_URL}/api/assets/${assetId}`, {
+  const res = await fetch(`${getImmichUrl()}/api/assets/${assetId}`, {
     headers: getHeaders(),
   });
   if (!res.ok) {
@@ -132,7 +137,7 @@ export async function getAssetInfo(assetId: string): Promise<ImmichAsset> {
 // --- Server Info ---
 
 export async function pingServer(): Promise<{ status: string }> {
-  const res = await fetch(`${IMMICH_URL}/api/server-info/ping`, {
+  const res = await fetch(`${getImmichUrl()}/api/server-info/ping`, {
     headers: { Accept: "application/json" },
   });
   if (!res.ok) {
@@ -143,7 +148,7 @@ export async function pingServer(): Promise<{ status: string }> {
 
 // Check if Immich is configured
 export function isImmichConfigured(): boolean {
-  return Boolean(IMMICH_URL && IMMICH_KEY);
+  return Boolean(getImmichUrl() && getImmichKey());
 }
 
 // --- Download / Upload helpers for worker ---
@@ -152,10 +157,10 @@ export async function downloadAssetToFile(
   assetId: string,
   localPath: string
 ): Promise<void> {
-  const res = await fetch(`${IMMICH_URL}/api/assets/${assetId}/original`, {
+  const res = await fetch(`${getImmichUrl()}/api/assets/${assetId}/original`, {
     headers: {
       Accept: "application/octet-stream",
-      "x-api-key": IMMICH_KEY,
+      "x-api-key": getImmichKey(),
     },
   });
   if (!res.ok) {
@@ -184,11 +189,11 @@ export async function uploadAssetFromFile(
   form.append("fileCreatedAt", fileCreatedAt);
   form.append("fileModifiedAt", fileModifiedAt);
 
-  const res = await fetch(`${IMMICH_URL}/api/assets`, {
+  const res = await fetch(`${getImmichUrl()}/api/assets`, {
     method: "POST",
     headers: {
       Accept: "application/json",
-      "x-api-key": IMMICH_KEY,
+      "x-api-key": getImmichKey(),
     },
     body: form as any,
   });
@@ -205,12 +210,12 @@ export async function addAssetsToAlbum(
   albumId: string,
   assetIds: string[]
 ): Promise<void> {
-  const res = await fetch(`${IMMICH_URL}/api/albums/${albumId}/assets`, {
+  const res = await fetch(`${getImmichUrl()}/api/albums/${albumId}/assets`, {
     method: "PUT",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "x-api-key": IMMICH_KEY,
+      "x-api-key": getImmichKey(),
     },
     body: JSON.stringify({ ids: assetIds }),
   });
@@ -223,12 +228,12 @@ export async function updateAssetDescription(
   assetId: string,
   description: string
 ): Promise<void> {
-  const res = await fetch(`${IMMICH_URL}/api/assets/${assetId}`, {
+  const res = await fetch(`${getImmichUrl()}/api/assets/${assetId}`, {
     method: "PUT",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "x-api-key": IMMICH_KEY,
+      "x-api-key": getImmichKey(),
     },
     body: JSON.stringify({ description }),
   });
@@ -247,7 +252,7 @@ export async function syncTagsToImmich(
   assetId: string,
   tags: string[]
 ): Promise<void> {
-  if (!IMMICH_KEY) {
+  if (!getImmichKey()) {
     console.warn("[immich] syncTagsToImmich: no API key configured");
     return;
   }
@@ -346,11 +351,11 @@ export async function smartSearchImmich(
   query: string,
   eventId?: string
 ): Promise<string[]> {
-  if (!IMMICH_KEY) {
+  if (!getImmichKey()) {
     throw new Error("Immich not configured");
   }
 
-  const res = await fetch(`${IMMICH_URL}/api/search/smart`, {
+  const res = await fetch(`${getImmichUrl()}/api/search/smart`, {
     method: "POST",
     headers: getHeaders(),
     body: JSON.stringify({ query, clip: true }),
