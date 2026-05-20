@@ -318,8 +318,8 @@
         "Verify UI renders correctly in browser at expected route"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": "This is the data flywheel. The scoring weights (currently hardcoded 50/30/20) should eventually be configurable via an admin settings table that this loop can update."
+      "passes": true,
+      "notes": "Implemented 2026-05-20. FeedbackAnalysisReport model with reportJson, recommendations, appliedAt, feedbackCount. runFeedbackAnalysis() in src/lib/feedback-analysis.ts aggregates 30-day CampaignFeedback (avg rating, productionWorthy%, music satisfaction, wouldChange themes via keyword extraction, sentiment by clipType), sends structured prompt to Venice qwen-qwq-32b reasoning model for score weight/duration threshold/keyword/music prompt recommendations, stores result in FeedbackAnalysisReport. GET /api/admin/feedback-report returns aggregated data with admin auth token. /admin/feedback page displays metrics, theme cloud, sentiment bars, AI recommendations panel, recent feedback table. Weekly cron job (Sundays 02:00) via script src/scripts/run-feedback-analysis.ts. Commit: 7269756."
     }
   ]
 }
