@@ -190,6 +190,7 @@ model Campaign {
 
   campaignClips  CampaignClip[]
   campaignFeedbacks CampaignFeedback[]
+  feedbackAnalysisReports FeedbackAnalysisReport[]
 
   @@index([eventId])
   @@index([status])
@@ -210,6 +211,21 @@ model CampaignFeedback {
   @@index([campaignId])
   @@index([createdAt])
   @@map("campaign_feedbacks")
+}
+
+model FeedbackAnalysisReport {
+  id             String   @id @default(cuid())
+  campaignId     String?
+  campaign       Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  generatedAt    DateTime @default(now())
+  reportJson     Json     // Raw aggregated data
+  recommendations String   @db.Text
+  appliedAt      DateTime?
+  feedbackCount  Int      @default(0) // How many feedback records analyzed
+
+  @@index([campaignId])
+  @@index([generatedAt])
+  @@map("feedback_analysis_reports")
 }
 
 model CampaignClip {
