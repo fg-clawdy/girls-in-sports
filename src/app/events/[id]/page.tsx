@@ -134,6 +134,16 @@ export default function EventPage() {
   // Lightbox state
   const [lightboxAsset, setLightboxAsset] = useState<ImmichAsset | null>(null);
 
+  // Edit event modal
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editForm, setEditForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "" });
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState("");
+
+  // Delete confirmation
+  const [deleteTarget, setDeleteTarget] = useState<{ assetId: string; fileName: string } | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+
   const fetchEventData = useCallback(async () => {
     try {
       const eventRes = await fetch(`/api/events/${id}`);
@@ -327,6 +337,67 @@ export default function EventPage() {
     e.preventDefault();
   };
 
+  // ── Edit Event ──
+  const handleEditEvent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!event) return;
+    setEditLoading(true);
+    setEditError("");
+    try {
+      const body: Record<string, unknown> = {};
+      if (editForm.name.trim()) body.name = editForm.name.trim();
+      if (editForm.sport.trim()) body.sport = editForm.sport.trim();
+      if (editForm.city.trim()) body.city = editForm.city.trim();
+      if (editForm.eventDate) body.eventDate = editForm.eventDate;
+      if (editForm.description.trim()) body.description = editForm.description.trim();
+
+      const res = await fetch(`/api/events/${event.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update");
+      setShowEditModal(false);
+      await fetchEventData();
+    } catch (err: any) {
+      setEditError(err.message);
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  const openEditModal = () => {
+    if (!event) return;
+    setEditForm({
+      name: event.name,
+      sport: event.sport,
+      city: event.city,
+      eventDate: event.eventDate ? new Date(event.eventDate).toISOString().split("T")[0] : "",
+      description: event.description || "",
+    });
+    setEditError("");
+    setShowEditModal(true);
+  };
+
+  // ── Delete Asset ──
+  const handleDeleteAsset = async () => {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
+    try {
+      const res = await fetch(`/api/events/${id}/assets/${deleteTarget.assetId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("Delete failed");
+      setDeleteTarget(null);
+      await fetchEventData();
+    } catch (err: any) {
+      alert("Failed to delete: " + err.message);
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
   // US-006: Check if any selected full video overlaps with selected scene segments
   const checkForDuplicateScenes = (): boolean => {
     for (const parentId of Object.keys(sceneSegments)) {
@@ -482,7 +553,15 @@ export default function EventPage() {
           >
             &larr; Back to Events
           </Link>
-          <h1 className="text-2xl font-bold text-zinc-900">{event.name}</h1>
+          <div className="flex items-center justify-between">
+            <h1 className="text-2xl font-bold text-zinc-900">{event.name}</h1>
+            <button
+              onClick={openEditModal}
+              className="text-sm px-3 py-1.5 rounded-md bg-white text-zinc-700 border border-zinc-200 hover:bg-zinc-50 transition-colors"
+            >
+              Edit Event
+            </button>
+          </div>
           <div className="flex items-center gap-3 mt-2 text-sm text-zinc-600">
             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium">
               {event.sport}
@@ -743,6 +822,7 @@ export default function EventPage() {
                   }}
                   feedback={feedbackMap[asset.id] || null}
                   qualityFlags={qualityFlags[asset.id] || undefined}
+                  onDelete={() => setDeleteTarget({ assetId: asset.id, fileName: asset.originalFileName })}
                 />
                 {/* Scene segments for this video */}
                 {asset.type === "VIDEO" && sceneSegments[asset.id] && sceneSegments[asset.id].length > 0 && (
@@ -1588,6 +1668,90 @@ export default function EventPage() {
           <span className="text-2xl">🤖</span>
         </button>
       )}
+      {/* ── Edit Event Modal ── */}
+      {showEditModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowEditModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h2 className="text-lg font-semibold text-zinc-900 mb-4">Edit Event</h2>
+            <form onSubmit={handleEditEvent} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Name</label>
+                <input
+                  required value={editForm.name}
+                  onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700">Sport</label>
+                  <input
+                    value={editForm.sport}
+                    onChange={(e) => setEditForm((p) => ({ ...p, sport: e.target.value }))}
+                    className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700">City</label>
+                  <input
+                    value={editForm.city}
+                    onChange={(e) => setEditForm((p) => ({ ...p, city: e.target.value }))}
+                    className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Date</label>
+                <input
+                  type="date" value={editForm.eventDate}
+                  onChange={(e) => setEditForm((p) => ({ ...p, eventDate: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Description</label>
+                <textarea
+                  rows={2} value={editForm.description}
+                  onChange={(e) => setEditForm((p) => ({ ...p, description: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              {editError && <p className="text-sm text-red-600">{editError}</p>}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setShowEditModal(false)}
+                  className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors">Cancel</button>
+                <button type="submit" disabled={editLoading}
+                  className="text-sm px-4 py-2 rounded-md bg-[var(--accent)] text-white font-medium hover:opacity-90 disabled:opacity-50 transition-opacity">
+                  {editLoading ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete Confirmation Modal ── */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setDeleteTarget(null)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
+            <h2 className="text-lg font-semibold text-zinc-900 mb-2">Remove Media?</h2>
+            <p className="text-sm text-zinc-600 mb-4">
+              Delete <strong className="text-zinc-900">{deleteTarget.fileName}</strong> from this event? This cannot be undone.
+            </p>
+            {deleteLoading && <p className="text-sm text-zinc-500 mb-2">Removing...</p>}
+            <div className="flex items-center justify-end gap-3">
+              <button onClick={() => setDeleteTarget(null)}
+                className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors">Cancel</button>
+              <button onClick={handleDeleteAsset} disabled={deleteLoading}
+                className="text-sm px-4 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 transition-colors">
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1601,6 +1765,7 @@ export default function EventPage() {
   onFeedback,
   feedback,
   qualityFlags,
+  onDelete,
 }: {
   asset: ImmichAsset;
   selectionMode: boolean;
@@ -1610,6 +1775,7 @@ export default function EventPage() {
   onFeedback?: (rating: "POSITIVE" | "NEGATIVE") => void;
   feedback?: "POSITIVE" | "NEGATIVE" | null;
   qualityFlags?: string[];
+  onDelete?: () => void;
 }) {
   const [loaded, setLoaded] = useState(false);
   const isVideo = asset.type === "VIDEO";
@@ -1711,6 +1877,19 @@ export default function EventPage() {
           />
         )}
       </div>
+      {/* Delete button overlay on hover */}
+      {!selectionMode && onDelete && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="absolute top-1 right-1 z-10 w-6 h-6 rounded-full bg-red-500/80 hover:bg-red-600 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+          title="Remove media"
+        >
+          ✕
+        </button>
+      )}
       <div className="p-2">
         <p className="text-xs text-zinc-500 truncate" title={asset.originalFileName}>
           {asset.originalFileName}
@@ -1736,6 +1915,7 @@ export default function EventPage() {
           </div>
         )}
       </div>
+
     </div>
   );
 }

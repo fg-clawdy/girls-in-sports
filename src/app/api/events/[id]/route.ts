@@ -24,3 +24,32 @@ export async function GET(
     );
   }
 }
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const body = await request.json();
+    const { name, sport, city, eventDate, description } = body;
+
+    const event = await prisma.event.update({
+      where: { id: params.id },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(sport !== undefined && { sport }),
+        ...(city !== undefined && { city }),
+        ...(eventDate !== undefined && { eventDate: new Date(eventDate) }),
+        ...(description !== undefined && { description }),
+      },
+    });
+
+    return NextResponse.json({ event });
+  } catch (error) {
+    console.error("Update event error:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to update event" },
+      { status: 500 }
+    );
+  }
+}

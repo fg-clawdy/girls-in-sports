@@ -77,6 +77,19 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
 
+  // Create Event modal state
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createForm, setCreateForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "" });
+  const [createLoading, setCreateLoading] = useState(false);
+  const [createError, setCreateError] = useState("");
+
+  // Edit Event modal state
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editEvent, setEditEvent] = useState<EventItem | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "" });
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState("");
+
   const hasActiveJobs = jobs.some(
     (j) => j.status === "QUEUED" || j.status === "RUNNING" || j.status === "RETRYING"
   );
@@ -116,6 +129,60 @@ export default function DashboardPage() {
       setError("Failed to retry job");
     } finally {
       setRetryingJobId(null);
+    }
+  };
+
+  // ── Create Event ──────────────────────────────────────
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreateLoading(true);
+    setCreateError("");
+    try {
+      const res = await fetch("/api/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(createForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to create event");
+      setShowCreateModal(false);
+      setCreateForm({ name: "", sport: "", city: "", eventDate: "", description: "" });
+      await fetchDashboard();
+    } catch (err: any) {
+      setCreateError(err.message);
+    } finally {
+      setCreateLoading(false);
+    }
+  };
+
+  // ── Edit Event ──────────────────────────────────────
+  const openEdit = (event: EventItem) => {
+    setEditEvent(event);
+    setEditForm({ name: event.name, sport: "", city: "", eventDate: "", description: "" });
+    setEditError("");
+    setShowEditModal(true);
+  };
+
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editEvent) return;
+    setEditLoading(true);
+    setEditError("");
+    try {
+      const res = await fetch(`/api/events/${editEvent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update event");
+      setShowEditModal(false);
+      setEditEvent(null);
+      await fetchDashboard();
+    } catch (err: any) {
+      setEditError(err.message);
+    } finally {
+      setEditLoading(false);
     }
   };
 
@@ -164,6 +231,12 @@ export default function DashboardPage() {
             <Link href="/results" className="text-sm text-zinc-600 hover:text-zinc-900">
               Results
             </Link>
+            <button
+              onClick={() => { setShowCreateModal(true); setCreateError(""); }}
+              className="text-sm px-3 py-1.5 rounded-md bg-[var(--accent)] text-white font-medium hover:opacity-90 transition-opacity"
+            >
+              + Create Event
+            </button>
           </div>
         </div>
       </header>
@@ -184,26 +257,54 @@ export default function DashboardPage() {
 
         {/* Pipeline progress per event */}
         <section>
-          <h2 className="text-sm font-semibold text-zinc-800 mb-3">Production Pipeline</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-zinc-800">Production Pipeline</h2>
+            <button
+              onClick={() => { setShowCreateModal(true); setCreateError(""); }}
+              className="text-xs px-2.5 py-1 rounded bg-[var(--accent)] text-white font-medium hover:opacity-90 transition-opacity"
+            >
+              + New Event
+            </button>
+          </div>
           {events.length === 0 && !loading ? (
-            <p className="text-sm text-zinc-400">No events yet.</p>
+            <div className="bg-white rounded-lg border border-zinc-200 p-8 text-center">
+              <p className="text-sm text-zinc-500 mb-1">No events yet.</p>
+              <p className="text-xs text-zinc-400 mb-3">Create your first event to get started.</p>
+              <button
+                onClick={() => { setShowCreateModal(true); setCreateError(""); }}
+                className="text-sm px-4 py-2 rounded-md bg-[var(--accent)] text-white font-medium hover:opacity-90 transition-opacity"
+              >
+                Create Event
+              </button>
+            </div>
           ) : (
             <div className="space-y-3">
               {events.map((event) => {
                 const eventCampaigns = campaigns.filter((c) => c.eventId === event.id);
-                const campaign = eventCampaigns[0]; // Show most recent campaign
+                const campaign = eventCampaigns[0];
                 const stages = getPipelineStages(event.status, campaign);
 
                 return (
                   <div key={event.id} className="bg-white rounded-lg border border-zinc-200 p-4">
                     <div className="flex items-center justify-between mb-3">
                       <div>
-                        <h3 className="text-sm font-semibold text-zinc-900">{event.name}</h3>
+                        <Link href={`/events/${event.id}`} className="text-sm font-semibold text-zinc-900 hover:text-[var(--accent)] transition-colors">
+                          {event.name}
+                        </Link>
                         <p className="text-xs text-zinc-500">{event.sport} &middot; {new Date(event.createdAt).toLocaleDateString()}</p>
                       </div>
-                      {campaign && (
-                        <span className="text-xs text-zinc-400">{campaign.name}</span>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {campaign && (
+                          <span className="text-xs text-zinc-400">{campaign.name}</span>
+                        )}
+                        <button
+                          onClick={() => openEdit(event)}
+                          className="text-xs text-zinc-400 hover:text-zinc-700 px-2 py-1 rounded hover:bg-zinc-100 transition-colors"
+                          title="Edit event"
+                        >
+                          Edit
+                        </button>
+                      </div>
                     </div>
 
                     {/* Stage bar */}
@@ -340,6 +441,157 @@ export default function DashboardPage() {
           <p className="text-sm text-red-600">{error}</p>
         )}
       </main>
+
+      {/* ── Create Event Modal ───────────────────────── */}
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowCreateModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h2 className="text-lg font-semibold text-zinc-900 mb-4">Create New Event</h2>
+            <form onSubmit={handleCreate} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Event Name</label>
+                <input
+                  required
+                  value={createForm.name}
+                  onChange={(e) => setCreateForm((p) => ({ ...p, name: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700">Sport</label>
+                  <input
+                    required
+                    value={createForm.sport}
+                    onChange={(e) => setCreateForm((p) => ({ ...p, sport: e.target.value }))}
+                    className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700">City</label>
+                  <input
+                    required
+                    value={createForm.city}
+                    onChange={(e) => setCreateForm((p) => ({ ...p, city: e.target.value }))}
+                    className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Event Date</label>
+                <input
+                  type="date"
+                  required
+                  value={createForm.eventDate}
+                  onChange={(e) => setCreateForm((p) => ({ ...p, eventDate: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Description</label>
+                <textarea
+                  rows={2}
+                  value={createForm.description}
+                  onChange={(e) => setCreateForm((p) => ({ ...p, description: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              {createError && <p className="text-sm text-red-600">{createError}</p>}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateModal(false)}
+                  className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={createLoading}
+                  className="text-sm px-4 py-2 rounded-md bg-[var(--accent)] text-white font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  {createLoading ? "Creating..." : "Create Event"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Edit Event Modal ───────────────────────── */}
+      {showEditModal && editEvent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowEditModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h2 className="text-lg font-semibold text-zinc-900 mb-4">Edit Event</h2>
+            <form onSubmit={handleEdit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Event Name</label>
+                <input
+                  required
+                  value={editForm.name}
+                  onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700">Sport</label>
+                  <input
+                    value={editForm.sport}
+                    onChange={(e) => setEditForm((p) => ({ ...p, sport: e.target.value }))}
+                    className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700">City</label>
+                  <input
+                    value={editForm.city}
+                    onChange={(e) => setEditForm((p) => ({ ...p, city: e.target.value }))}
+                    className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Event Date</label>
+                <input
+                  type="date"
+                  value={editForm.eventDate}
+                  onChange={(e) => setEditForm((p) => ({ ...p, eventDate: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700">Description</label>
+                <textarea
+                  rows={2}
+                  value={editForm.description}
+                  onChange={(e) => setEditForm((p) => ({ ...p, description: e.target.value }))}
+                  className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                />
+              </div>
+              {editError && <p className="text-sm text-red-600">{editError}</p>}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowEditModal(false)}
+                  className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editLoading}
+                  className="text-sm px-4 py-2 rounded-md bg-[var(--accent)] text-white font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  {editLoading ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
