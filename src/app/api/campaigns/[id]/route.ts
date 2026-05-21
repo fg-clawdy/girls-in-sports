@@ -173,6 +173,44 @@ export async function POST(
       return NextResponse.json({ campaign });
     }
 
+    if (action === "adjust") {
+      const { notes } = body;
+      const campaign = await prisma.campaign.findUnique({
+        where: { id: params.id },
+      });
+      if (!campaign) {
+        return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
+      }
+
+      // Merge adjustment notes into userFeedbackJson
+      const existing = (campaign.userFeedbackJson as any) || {};
+      const updated = {
+        ...existing,
+        adjustmentNotes: notes,
+        adjustmentSubmittedAt: new Date().toISOString(),
+      };
+
+      await prisma.campaign.update({
+        where: { id: params.id },
+        data: {
+          userFeedbackJson: updated,
+          status: "DIRECTING",
+        },
+      });
+
+      // Enqueue DIRECT_SCRIPT with adjustment context
+      const { enqueueJob, JobType } = await import("@/lib/job-worker");
+      await enqueueJob(JobType.DIRECT_SCRIPT, {
+        campaignId: params.id,
+        eventId: campaign.eventId,
+        selectedAssetIds: campaign.selectedAssetIds,
+        mustIncludeAssetIds: [],
+        adjustmentNotes: notes,
+      });
+
+      return NextResponse.json({ queued: true });
+    }
+
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (error) {
     console.error("POST /campaigns/[id] action error:", error);

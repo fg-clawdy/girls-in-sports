@@ -22,6 +22,7 @@ interface DirectorPayload {
   eventId: string;
   selectedAssetIds: string[];
   mustIncludeAssetIds: string[];
+  adjustmentNotes?: string;
 }
 
 interface ProductionScript {
@@ -48,7 +49,7 @@ export async function handleDirectScript({
   payload: unknown;
   jobId: string;
 }) {
-  const { campaignId, eventId, selectedAssetIds, mustIncludeAssetIds } =
+  const { campaignId, eventId, selectedAssetIds, mustIncludeAssetIds, adjustmentNotes } =
     payload as DirectorPayload;
 
   console.log(`[direct-script] Starting job ${jobId} for campaign ${campaignId}`);
@@ -90,7 +91,8 @@ export async function handleDirectScript({
         acceptedClips,
         mustIncludeAssetIds,
         targetMs,
-        attempt > 0 ? lastError : undefined
+        attempt > 0 ? lastError : undefined,
+        adjustmentNotes
       );
 
       // Validate must-includes present
@@ -174,7 +176,8 @@ async function generateScript(
   acceptedClips: any[],
   mustIncludeAssetIds: string[],
   targetMs: number,
-  correctionHint?: string
+  correctionHint?: string,
+  adjustmentNotes?: string
 ): Promise<ProductionScript> {
   const clipManifest = acceptedClips.map((c) => ({
     clipId: c.assetId,
@@ -277,6 +280,7 @@ Accepted Clips (${clipManifest.length}):
 ${JSON.stringify(clipManifest, null, 2)}
 
 ${correctionHint ? `\n## CORRECTION NEEDED\nThe previous attempt failed with: ${correctionHint}\nPlease fix this issue and ensure all rules above are satisfied.\n` : ""}
+${adjustmentNotes ? `\n## USER ADJUSTMENT REQUEST\nThe user has reviewed a previous version and requests the following changes. Apply them thoughtfully while keeping the target duration and brand guidelines:\n${adjustmentNotes}\n` : ""}
 
 Generate the ProductionScript JSON now.`;
 

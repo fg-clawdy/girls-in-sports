@@ -63,6 +63,11 @@ export default function PreviewPage() {
   const [clipFeedback, setClipFeedback] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
+  // Adjustment dialog state
+  const [showAdjustModal, setShowAdjustModal] = useState(false);
+  const [adjustmentNotes, setAdjustmentNotes] = useState("");
+  const [adjusting, setAdjusting] = useState(false);
+
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const fetchCampaign = useCallback(async () => {
@@ -166,6 +171,27 @@ export default function PreviewPage() {
       }
     } catch {
       setError("Failed to reset");
+    }
+  };
+
+  const handleRequestAdjustment = async () => {
+    if (!adjustmentNotes.trim()) return;
+    setAdjusting(true);
+    try {
+      await fetch(`/api/campaigns/${campaignId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "adjust", notes: adjustmentNotes.trim() }),
+      });
+      setShowAdjustModal(false);
+      setAdjustmentNotes("");
+      setOverallRating(null);
+      // Refresh to show pipeline status
+      await fetchCampaign();
+    } catch {
+      setError("Failed to queue adjustment");
+    } finally {
+      setAdjusting(false);
     }
   };
 
@@ -472,7 +498,10 @@ export default function PreviewPage() {
                 Ready to Post
               </button>
               <button
-                onClick={() => setOverallRating("needs-adjustment")}
+                onClick={() => {
+                  setOverallRating("needs-adjustment");
+                  setShowAdjustModal(true);
+                }}
                 className={`px-4 py-2 rounded-md text-sm font-medium border transition-colors ${
                   overallRating === "needs-adjustment"
                     ? "bg-amber-50 text-amber-700 border-amber-300"
@@ -538,6 +567,40 @@ export default function PreviewPage() {
             {!overallRating && (
               <p className="text-xs text-red-500">Select an overall rating to enable approval.</p>
             )}
+          </div>
+        )}
+
+        {/* Adjustment Modal */}
+        {showAdjustModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6 space-y-4">
+              <h3 className="text-lg font-semibold text-zinc-900">Request Adjustment</h3>
+              <p className="text-sm text-zinc-500">
+                Describe what you'd like changed. The AI Director will regenerate the script and re-render the proxy with your feedback in mind.
+              </p>
+              <textarea
+                value={adjustmentNotes}
+                onChange={(e) => setAdjustmentNotes(e.target.value)}
+                placeholder="e.g. 'Make it more energetic', 'Lead with the coach speech', 'Remove the 3rd clip', 'Slow down the pacing'..."
+                rows={5}
+                className="w-full px-3 py-2 rounded-md border border-zinc-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              />
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  onClick={() => { setShowAdjustModal(false); setAdjustmentNotes(""); }}
+                  className="px-4 py-2 rounded-md text-sm font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleRequestAdjustment}
+                  disabled={!adjustmentNotes.trim() || adjusting}
+                  className="px-4 py-2 rounded-md text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-40 transition-colors"
+                >
+                  {adjusting ? "Queueing..." : "Submit Adjustment"}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </main>

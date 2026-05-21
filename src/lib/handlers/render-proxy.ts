@@ -83,10 +83,21 @@ export async function handleRenderProxy({
 
       const segPath = path.join(workDir, `seg_${i}.mp4`);
       await cutSegment(sourcePath, segPath, startMs / 1000, endMs / 1000);
-      segmentFiles.push(segPath);
 
-      // Clean up source immediately
+      // ── Label this segment with clip number before concat ──
+      const labeledPath = path.join(workDir, `seg_${i}_labeled.mp4`);
+      await runFfmpeg([
+        "-i", segPath,
+        "-vf", `drawtext=text='Clip ${i + 1}':fontcolor=white@0.9:fontsize=28:x=20:y=h-40:box=1:boxcolor=black@0.5:boxborderw=4`,
+        "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
+        "-c:a", "copy",
+        "-y", labeledPath,
+      ]);
+      segmentFiles.push(labeledPath);
+
+      // Clean up intermediates immediately
       try { await fs.unlink(sourcePath); } catch { /* ignore */ }
+      try { await fs.unlink(segPath); } catch { /* ignore */ }
     }
 
     if (segmentFiles.length === 0) {
