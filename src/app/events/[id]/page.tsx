@@ -67,6 +67,17 @@ interface JobItem {
   parentJobId: string | null;
 }
 
+interface CampaignItem {
+  id: string;
+  name: string;
+  status: string;
+  targetFormat: string;
+  energyPreset: string;
+  createdAt: string;
+  proxyVideoUrl: string | null;
+  finalVideoUrl: string | null;
+}
+
 // ── Constants ────────────────────────────────────────────────────────
 
 const FORMAT_OPTIONS: { value: string; label: string; duration: number }[] = [
@@ -144,6 +155,22 @@ function getStatusBadge(status: string) {
   }
 }
 
+function CampaignStatusBadge({ status }: { status: string }) {
+  const style =
+    status === "DIRECTING" ? "bg-blue-50 text-blue-700" :
+    status === "SCRIPTED" ? "bg-violet-50 text-violet-700" :
+    status === "PROXY_READY" ? "bg-cyan-50 text-cyan-700" :
+    status === "REVIEW" ? "bg-amber-50 text-amber-700" :
+    status === "FINAL" ? "bg-emerald-50 text-emerald-700" :
+    status === "FAILED" ? "bg-red-50 text-red-700" :
+    "bg-zinc-100 text-zinc-600";
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${style}`}>
+      {status.replace("_", " ")}
+    </span>
+  );
+}
+
 function formatDuration(startedAt: string | null) {
   if (!startedAt) return "—";
   const diff = Date.now() - new Date(startedAt).getTime();
@@ -187,6 +214,8 @@ export default function EventPage() {
   // ── Active Jobs ──
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [campaigns, setCampaigns] = useState<CampaignItem[]>([]);
+  const [campaignsLoading, setCampaignsLoading] = useState(true);
 
   // ── All Media (collapsed by default) ──
   const [showAllMedia, setShowAllMedia] = useState(false);
@@ -259,11 +288,25 @@ export default function EventPage() {
     }
   }, [eventId]);
 
+  const fetchCampaigns = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/events/${eventId}/campaigns`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setCampaigns(data.campaigns || []);
+    } catch {
+      // silently fail
+    } finally {
+      setCampaignsLoading(false);
+    }
+  }, [eventId]);
+
   useEffect(() => {
     fetchEventData();
     fetchClips();
     fetchJobs();
-  }, [fetchEventData, fetchClips, fetchJobs]);
+    fetchCampaigns();
+  }, [fetchEventData, fetchClips, fetchJobs, fetchCampaigns]);
 
   // Auto-poll jobs every 5s when there are active jobs
   const hasActiveJobs = jobs.some((j) => j.status === "QUEUED" || j.status === "RUNNING" || j.status === "RETRYING");
@@ -271,10 +314,11 @@ export default function EventPage() {
     if (!hasActiveJobs) return;
     const interval = setInterval(() => {
       fetchJobs();
-      fetchClips(); // also refresh clips as jobs complete
+      fetchClips();
+      fetchCampaigns();
     }, POLL_INTERVAL);
     return () => clearInterval(interval);
-  }, [hasActiveJobs, fetchJobs, fetchClips]);
+  }, [hasActiveJobs, fetchJobs, fetchClips, fetchCampaigns]);
 
   // Upload toast timer
   useEffect(() => {
@@ -721,6 +765,37 @@ export default function EventPage() {
                 <p className="text-xs text-zinc-400 mt-1">
                   {TIER_OPTIONS.find((t) => t.value === (event?.qualityTier ?? "PROFESSIONAL"))?.desc}
                 </p>
+              </div>
+
+              {/* Campaigns */}
+              <div className="bg-white rounded-lg border border-zinc-200 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-zinc-900">Campaigns</h3>
+                  <span className="text-xs text-zinc-400">{campaigns.length}</span>
+                </div>
+                {campaignsLoading ? (
+                  <p className="text-xs text-zinc-400">Loading...</p>
+                ) : campaigns.length === 0 ? (
+                  <p className="text-xs text-zinc-400">No campaigns yet. Create one below.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {campaigns.map((c) => (
+                      <Link
+                        key={c.id}
+                        href={`/campaigns/${c.id}/preview`}
+                        className="block rounded-md border border-zinc-100 p-2.5 hover:bg-zinc-50 transition-colors"
+                      >
+                        <div className="flex items-center justify-between">
+                          <p className="text-sm font-medium text-zinc-800 truncate">{c.name}</p>
+                          <CampaignStatusBadge status={c.status} />
+                        </div>
+                        <p className="text-[10px] text-zinc-400 mt-0.5">
+                          {c.targetFormat.replace("_", " ")} · {c.energyPreset.toLowerCase()}
+                        </p>
+                      </Link>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Creative Brief */}

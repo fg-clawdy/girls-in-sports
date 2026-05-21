@@ -2,6 +2,32 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { enqueueJob, JobType } from "@/lib/job-worker";
 
+export async function GET(
+  _request: Request,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const campaigns = await prisma.campaign.findMany({
+      where: { eventId: params.id },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        targetFormat: true,
+        energyPreset: true,
+        createdAt: true,
+        proxyVideoUrl: true,
+        finalVideoUrl: true,
+      },
+    });
+    return NextResponse.json({ campaigns });
+  } catch (error) {
+    console.error("GET /events/[id]/campaigns error:", error);
+    return NextResponse.json({ error: "Failed to load campaigns" }, { status: 500 });
+  }
+}
+
 export async function POST(
   request: Request,
   { params }: { params: { id: string } }
