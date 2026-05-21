@@ -123,6 +123,7 @@ model ClipScore {
   hasActionKeyword Boolean  @default(false)
   transcriptExcerpt String?
   keywordHits      Json?    // { keyword: string, count: number }[]
+  sttWords         Json?    // [{ word: string, start: number, end: number }, ...]
   scoredAt         DateTime @default(now())
 
   @@map("clip_scores")

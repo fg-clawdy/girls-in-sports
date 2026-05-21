@@ -49,7 +49,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
 
     // ── 2. Run STT on raw video ──
     const sttResult = await transcribeVideo(sourcePath);
-    const { transcript, segments: sttSegments } = sttResult;
+    const { transcript, segments: sttSegments, words: sttWords } = sttResult;
 
     // ── 3. Compute audio/keyword score ──
     const keywords = SPORT_KEYWORDS[sport] || SPORT_KEYWORDS.default;
@@ -118,6 +118,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         ),
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
+        sttWords: sttWords.length > 0 ? JSON.stringify(sttWords) : undefined,
       },
       update: {
         visionScore: Math.round(professionalScore),
@@ -135,6 +136,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         ),
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
+        sttWords: sttWords.length > 0 ? JSON.stringify(sttWords) : undefined,
       },
     });
 
@@ -220,21 +222,24 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
   }
 }
 
-// ── STT: Extract audio then send to Venice /audio/transcriptions ──
+// ── STT: Extract audio (WAV 16kHz mono) then send to Venice /audio/transcriptions ──
+// Uses timestamps=true for word-level granularity. Falls back gracefully if
+// Venice returns no words array (service degradation).
 async function transcribeVideo(videoPath: string): Promise<{
   transcript: string;
   segments: Array<{ start: number; end: number; text: string }>;
+  words: Array<{ word: string; start: number; end: number }>;
 }> {
-  // Extract audio to MP3 for reliable STT ingestion
-  const audioPath = videoPath + ".mp3";
-  await extractAudioToMp3(videoPath, audioPath);
+  const audioPath = videoPath + ".wav";
+  await extractAudioToWav(videoPath, audioPath);
 
   try {
     const buf = readFileSync(audioPath);
     const form = new FormData();
-    form.append("file", new Blob([buf], { type: "audio/mp3" }), "audio.mp3");
+    form.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
     form.append("model", "openai/whisper-large-v3");
     form.append("response_format", "json");
+    form.append("timestamps", "true");
 
     const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
       method: "POST",
@@ -249,14 +254,54 @@ async function transcribeVideo(videoPath: string): Promise<{
 
     const data = await res.json();
     const text = data.text || "";
+    const rawWords = data.words || [];
 
-    // Venice json mode returns just text — create a single segment
-    return {
-      transcript: text,
-      segments: text
-        ? [{ start: 0, end: 0, text }]
-        : [],
-    };
+    if (!Array.isArray(rawWords) || rawWords.length === 0) {
+      // Service degraded — fallback to segment-less mode
+      return {
+        transcript: text,
+        segments: text ? [{ start: 0, end: 0, text }] : [],
+        words: [],
+      };
+    }
+
+    const words = rawWords.map((w: any) => ({
+      word: String(w.word || "").trim(),
+      start: Number(w.start ?? 0),
+      end: Number(w.end ?? 0),
+    })).filter((w: any) => w.word.length > 0);
+
+    // Group words into segments (~8–12 words or pause > 1.5s)
+    const segments: Array<{ start: number; end: number; text: string }> = [];
+    let currentWords: typeof words = [];
+
+    for (const w of words) {
+      if (currentWords.length === 0) {
+        currentWords.push(w);
+        continue;
+      }
+      const last = currentWords[currentWords.length - 1];
+      const pause = w.start - last.end;
+      if (pause > 1.5 || currentWords.length >= 12) {
+        segments.push({
+          start: currentWords[0].start,
+          end: last.end,
+          text: currentWords.map((cw: any) => cw.word).join(" "),
+        });
+        currentWords = [w];
+      } else {
+        currentWords.push(w);
+      }
+    }
+    if (currentWords.length > 0) {
+      segments.push({
+        start: currentWords[0].start,
+        end: currentWords[currentWords.length - 1].end,
+        text: currentWords.map((cw: any) => cw.word).join(" "),
+      });
+    }
+
+    return { transcript: text, segments, words };
   } finally {
     try {
       await fs.unlink(audioPath);
@@ -266,14 +311,14 @@ async function transcribeVideo(videoPath: string): Promise<{
   }
 }
 
-async function extractAudioToMp3(videoPath: string, audioPath: string): Promise<void> {
+async function extractAudioToWav(videoPath: string, audioPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", [
       "-i", videoPath,
       "-vn",
       "-ar", "16000",
       "-ac", "1",
-      "-b:a", "32k",
+      "-c:a", "pcm_s16le",
       "-y",
       audioPath,
     ]);

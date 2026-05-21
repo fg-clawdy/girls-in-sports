@@ -26,6 +26,11 @@ export interface AudioAnalysisResult {
     text: string;
     confidence?: number;
   }>;
+  words?: Array<{
+    word: string;
+    start: number;
+    end: number;
+  }>;
   audioScore: number; // 0-100
   keywordHits: string[];
   keywordCount: number;
@@ -63,8 +68,75 @@ export async function extractAudioFromVideo(
 }
 
 /**
- * Send audio file to Venice.ai STT API.
- * Returns transcript + segments with timestamps.
+ * Parse Venice /audio/transcriptions response with timestamps=true.
+ * Groups words into sentence-level segments for scene mapping.
+ */
+function parseTranscriptionResponse(data: any): {
+  text: string;
+  segments: Array<{ start: number; end: number; text: string }>;
+  words: Array<{ word: string; start: number; end: number }>;
+} {
+  const text = (data.text || "").trim();
+  const rawWords = data.words || [];
+
+  if (!Array.isArray(rawWords) || rawWords.length === 0) {
+    // Fallback: single segment with no timing
+    return {
+      text,
+      segments: text ? [{ start: 0, end: 0, text }] : [],
+      words: [],
+    };
+  }
+
+  const words = rawWords.map((w: any) => ({
+    word: String(w.word || "").trim(),
+    start: Number(w.start ?? 0),
+    end: Number(w.end ?? 0),
+  })).filter((w: any) => w.word.length > 0);
+
+  // Group words into segments (~8–12 words or pause > 1.5s)
+  const segments: Array<{ start: number; end: number; text: string }> = [];
+  let currentWords: typeof words = [];
+
+  for (const w of words) {
+    if (currentWords.length === 0) {
+      currentWords.push(w);
+      continue;
+    }
+    const last = currentWords[currentWords.length - 1];
+    const pause = w.start - last.end;
+    // Break on long pause or max segment length
+    if (pause > 1.5 || currentWords.length >= 12) {
+      segments.push({
+        start: currentWords[0].start,
+        end: last.end,
+        text: currentWords.map((cw) => cw.word).join(" "),
+      });
+      currentWords = [w];
+    } else {
+      currentWords.push(w);
+    }
+  }
+
+  if (currentWords.length > 0) {
+    segments.push({
+      start: currentWords[0].start,
+      end: currentWords[currentWords.length - 1].end,
+      text: currentWords.map((cw) => cw.word).join(" "),
+    });
+  }
+
+  return { text, segments, words };
+}
+
+/**
+ * Send audio file to Venice.ai STT API with timestamps=true.
+ * Uses WAV (pcm_s16le 16kHz mono) for best compatibility.
+ * Returns transcript + segments + word-level timestamps.
+ *
+ * DEPRECATED path: if Venice returns no words array (e.g. service degraded),
+ * falls back to single-segment mode. The old verbose_json path is kept
+ * in the codebase but not used — remove after Venice transcription GA.
  */
 export async function transcribeWithVenice(
   audioPath: string,
@@ -72,13 +144,15 @@ export async function transcribeWithVenice(
 ): Promise<{
   text: string;
   segments: Array<{ start: number; end: number; text: string }>;
+  words: Array<{ word: string; start: number; end: number }>;
 }> {
   const audioBuffer = await readFile(audioPath);
 
   const formData = new FormData();
   formData.append("file", new Blob([audioBuffer], { type: "audio/wav" }), "audio.wav");
   formData.append("model", model);
-  formData.append("response_format", "verbose_json");
+  formData.append("response_format", "json");
+  formData.append("timestamps", "true");
 
   const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
     method: "POST",
@@ -94,20 +168,7 @@ export async function transcribeWithVenice(
   }
 
   const data = await res.json();
-
-  // Venice returns OpenAI-compatible format:
-  // { text: "...", segments: [{ id, start, end, text, confidence? }] }
-  const segments = (data.segments || []).map((s: any) => ({
-    start: s.start ?? 0,
-    end: s.end ?? 0,
-    text: s.text ?? "",
-    confidence: s.confidence ?? s.avg_logprob ?? undefined,
-  }));
-
-  return {
-    text: data.text || "",
-    segments,
-  };
+  return parseTranscriptionResponse(data);
 }
 
 // Keywords that indicate high-energy, marketable moments
@@ -188,13 +249,14 @@ export async function analyzeVideoAudio(
 
   try {
     audioPath = await extractAudioFromVideo(localVideoPath);
-    const { text, segments } = await transcribeWithVenice(audioPath, model);
+    const { text, segments, words } = await transcribeWithVenice(audioPath, model);
     const { score, keywordHits, keywordCount } = computeAudioScore(text, segments);
 
     return {
       assetId,
       transcript: text,
       segments,
+      words,
       audioScore: score,
       keywordHits,
       keywordCount,
@@ -204,6 +266,7 @@ export async function analyzeVideoAudio(
       assetId,
       transcript: "",
       segments: [],
+      words: [],
       audioScore: 0,
       keywordHits: [],
       keywordCount: 0,
