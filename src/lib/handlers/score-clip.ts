@@ -66,7 +66,9 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     const framePaths = await extractKeyframes(sourcePath, framesDir, frameCount, duration);
 
     // ── 5. Vision analysis on keyframes ──
-    let visionScore = 0;
+    let amateurScore = 0;
+    let intermediateScore = 0;
+    let professionalScore = 0;
     let faceCount = 0;
     let hasFaces = false;
     let actionClarity = 0;
@@ -75,7 +77,9 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
 
     if (VENICE_API_KEY && framePaths.length > 0) {
       const visionResults = await analyzeKeyframesWithVision(framePaths, sport);
-      visionScore = visionResults.overallScore;
+      amateurScore = visionResults.amateurScore;
+      intermediateScore = visionResults.intermediateScore;
+      professionalScore = visionResults.professionalScore;
       faceCount = visionResults.faceCount;
       hasFaces = faceCount > 0;
       actionClarity = visionResults.actionClarity;
@@ -86,9 +90,9 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     // ── 6. Compute motion score locally ──
     const motionScore = await computeMotionScore(sourcePath);
 
-    // ── 7. Composite score ──
+    // ── 7. Composite score (legacy: keeps the old overall for backwards compat) ──
     const composite = Math.round(
-      visionScore * 0.50 + audioScore * 0.30 + motionScore * 0.20
+      amateurScore * 0.50 + audioScore * 0.30 + motionScore * 0.20
     );
 
     // ── 8. Assign clipType ──
@@ -99,10 +103,13 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       where: { assetId },
       create: {
         assetId,
-        visionScore: Math.round(visionScore),
+        visionScore: Math.round(professionalScore),
         audioScore: Math.round(audioScore),
         motionScore: Math.round(motionScore),
         compositeScore: composite,
+        amateurScore,
+        intermediateScore,
+        professionalScore,
         clipType,
         hasFaces,
         hasCoachSpeech,
@@ -113,10 +120,13 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         keywordHits: JSON.stringify(keywordHits),
       },
       update: {
-        visionScore: Math.round(visionScore),
+        visionScore: Math.round(professionalScore),
         audioScore: Math.round(audioScore),
         motionScore: Math.round(motionScore),
         compositeScore: composite,
+        amateurScore,
+        intermediateScore,
+        professionalScore,
         clipType,
         hasFaces,
         hasCoachSpeech,
@@ -350,27 +360,32 @@ async function analyzeKeyframesWithVision(
   framePaths: string[],
   sport: string
 ): Promise<{
-  overallScore: number;
+  amateurScore: number;
+  intermediateScore: number;
+  professionalScore: number;
   faceCount: number;
   actionClarity: number;
   subjectCentering: number;
   brandVisibility: boolean;
 }> {
-  const SYSTEM_PROMPT = `You are a sports photography evaluator for Girls In Sports.
+  const SYSTEM_PROMPT = `You are a sports media evaluator for Girls In Sports.
 Analyze the provided keyframes from a youth sports video clip.
 Return ONLY a valid JSON object with these fields:
-- energyScore (0-100): How energetic and dynamic the action is
+- amateurScore (0-100): Parent-shot iPhone footage. Generous grading — good action, visible faces, decent lighting are acceptable. Minor shake and noise are expected.
+- intermediateScore (0-100): Enthusiast-level footage. Some intentionality in framing, reasonable lighting, and clear action. Not pro-grade but deliberate.
+- professionalScore (0-100): Broadcast production standards. Stable gimbal/tripod, professional lighting, clean audio, cinematic framing.
 - faceCount (int): Number of visible faces
 - actionClarity (0-100): How clear the sports action is
 - subjectCentering (0-100): How well subjects are framed
 - brandVisibility (bool): Whether GIS branding/logos are visible
-- overallScore (0-100): Overall quality for marketing use
 
 Return ONLY the JSON object, no markdown, no explanations.`;
 
   // Read frames in batches of 3
   const batchSize = 3;
-  const scores: number[] = [];
+  const amateurScores: number[] = [];
+  const intermediateScores: number[] = [];
+  const professionalScores: number[] = [];
   let totalFaceCount = 0;
   let totalActionClarity = 0;
   let totalSubjectCentering = 0;
@@ -384,7 +399,7 @@ Return ONLY the JSON object, no markdown, no explanations.`;
     });
 
     const content: any[] = [
-      { type: "text", text: `Analyze ${batch.length} keyframes from a ${sport} clip. Return JSON.` },
+      { type: "text", text: `Analyze ${batch.length} keyframes from a ${sport} clip. Return JSON with amateurScore, intermediateScore, professionalScore.` },
     ];
     for (const img of images) {
       content.push({ type: "image_url", image_url: { url: img } });
@@ -418,23 +433,38 @@ Return ONLY the JSON object, no markdown, no explanations.`;
     try {
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
-      scores.push(Math.min(100, Math.max(0, Number(parsed.overallScore) || 50)));
+
+      amateurScores.push(Math.min(100, Math.max(0, Number(parsed.amateurScore) || 50)));
+      intermediateScores.push(Math.min(100, Math.max(0, Number(parsed.intermediateScore) || 40)));
+      professionalScores.push(Math.min(100, Math.max(0, Number(parsed.professionalScore) || 30)));
+
       totalFaceCount += Math.max(0, Number(parsed.faceCount) || 0);
       totalActionClarity += Math.min(100, Math.max(0, Number(parsed.actionClarity) || 50));
       totalSubjectCentering += Math.min(100, Math.max(0, Number(parsed.subjectCentering) || 50));
       if (parsed.brandVisibility === true) anyBrandVisible = true;
     } catch (e) {
       console.warn("Failed to parse vision response:", raw.slice(0, 200));
-      scores.push(50);
+      // Fallback: use a safe spread
+      amateurScores.push(50);
+      intermediateScores.push(40);
+      professionalScores.push(30);
     }
   }
 
-  const avgOverall = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 50;
+  const avgAmateur = amateurScores.length > 0
+    ? amateurScores.reduce((a, b) => a + b, 0) / amateurScores.length : 50;
+  const avgIntermediate = intermediateScores.length > 0
+    ? intermediateScores.reduce((a, b) => a + b, 0) / intermediateScores.length : 40;
+  const avgProfessional = professionalScores.length > 0
+    ? professionalScores.reduce((a, b) => a + b, 0) / professionalScores.length : 30;
+
   return {
-    overallScore: Math.round(avgOverall),
+    amateurScore: Math.round(avgAmateur),
+    intermediateScore: Math.round(avgIntermediate),
+    professionalScore: Math.round(avgProfessional),
     faceCount: totalFaceCount,
-    actionClarity: Math.round(totalActionClarity / Math.max(scores.length, 1)),
-    subjectCentering: Math.round(totalSubjectCentering / Math.max(scores.length, 1)),
+    actionClarity: Math.round(totalActionClarity / Math.max(amateurScores.length, 1)),
+    subjectCentering: Math.round(totalSubjectCentering / Math.max(amateurScores.length, 1)),
     brandVisibility: anyBrandVisible,
   };
 }

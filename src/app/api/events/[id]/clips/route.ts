@@ -20,6 +20,15 @@ export async function GET(
     };
     const threshold = tierThreshold[event.qualityTier] ?? 50;
 
+    // Select the tier-appropriate score for filtering
+    const tierScoreField = (() => {
+      switch (event.qualityTier) {
+        case "AMATEUR": return "amateurScore";
+        case "INTERMEDIATE": return "intermediateScore";
+        default: return "professionalScore";
+      }
+    })();
+
     const clips = await prisma.asset.findMany({
       where: {
         eventId: params.id,
@@ -29,7 +38,7 @@ export async function GET(
         ],
         status: "SCORED",
         clipScore: {
-          compositeScore: { gte: threshold },
+          [tierScoreField]: { gte: threshold },
         },
       },
       include: {
@@ -38,7 +47,7 @@ export async function GET(
       },
       orderBy: {
         clipScore: {
-          compositeScore: "desc",
+          [tierScoreField]: "desc",
         },
       },
     });

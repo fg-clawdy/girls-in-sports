@@ -44,6 +44,9 @@ interface ClipData {
   status: string;
   clipScore: {
     compositeScore: number | null;
+    amateurScore: number | null;
+    intermediateScore: number | null;
+    professionalScore: number | null;
     clipType: string | null;
     visionScore: number | null;
     audioScore: number | null;
@@ -264,9 +267,17 @@ export default function EventPage() {
       const data = await res.json();
       setClips(data.clips || []);
       const threshold = getTierThreshold(data.event?.qualityTier ?? "PROFESSIONAL");
+      const tier = data.event?.qualityTier ?? "PROFESSIONAL";
       const map: Record<string, boolean> = {};
       data.clips.forEach((c: ClipData) => {
-        map[c.id] = (c.clipScore?.compositeScore ?? 0) >= threshold;
+        const score = (() => {
+          switch (tier) {
+            case "AMATEUR": return c.clipScore?.amateurScore ?? 0;
+            case "INTERMEDIATE": return c.clipScore?.intermediateScore ?? 0;
+            default: return c.clipScore?.professionalScore ?? 0;
+          }
+        })();
+        map[c.id] = (score) >= threshold;
       });
       setAcceptedMap(map);
     } catch {
@@ -408,7 +419,14 @@ export default function EventPage() {
 
   const sortedClips = [...filteredClips].sort((a, b) => {
     if (sortBy === "score") {
-      return (b.clipScore?.compositeScore ?? 0) - (a.clipScore?.compositeScore ?? 0);
+      const getTieredScore = (c: ClipData) => {
+        switch (event?.qualityTier) {
+          case "AMATEUR": return c.clipScore?.amateurScore ?? 0;
+          case "INTERMEDIATE": return c.clipScore?.intermediateScore ?? 0;
+          default: return c.clipScore?.professionalScore ?? 0;
+        }
+      };
+      return getTieredScore(b) - getTieredScore(a);
     }
     if (sortBy === "duration") {
       return (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0);
@@ -893,7 +911,14 @@ export default function EventPage() {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
                   {sortedClips.map((clip) => {
-                    const score = clip.clipScore?.compositeScore ?? null;
+                    const getDisplayScore = (c: ClipData) => {
+                      switch (event?.qualityTier) {
+                        case "AMATEUR": return c.clipScore?.amateurScore ?? null;
+                        case "INTERMEDIATE": return c.clipScore?.intermediateScore ?? null;
+                        default: return c.clipScore?.professionalScore ?? null;
+                      }
+                    };
+                    const score = getDisplayScore(clip);
                     const type = clip.clipScore?.clipType ?? "UNKNOWN";
                     const accepted = acceptedMap[clip.id] ?? false;
                     const must = mustIncludeMap[clip.id] ?? false;

@@ -35,7 +35,7 @@ model Event {
   thumbnailUrl  String?
   userId      String?
   status      EventStatus @default(READY)
-  qualityTier QualityTier @default(PROFESSIONAL)
+  qualityTier QualityTier @default(AMATEUR)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -114,6 +114,9 @@ model ClipScore {
   audioScore       Float?
   motionScore      Float?
   compositeScore   Float?
+  amateurScore     Float?   @map("amateurscore")
+  intermediateScore Float?  @map("intermediatescore")
+  professionalScore Float?  @map("professionalscore")
   clipType         ClipType?
   hasFaces         Boolean  @default(false)
   hasCoachSpeech   Boolean  @default(false)
