@@ -239,6 +239,8 @@ async function transcribeVideo(videoPath: string): Promise<{
     form.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
     form.append("model", "openai/whisper-large-v3");
     form.append("response_format", "json");
+    // FormData values are always strings; "true" is the standard encoding
+    // for a boolean in multipart/form-data and Venice parses it correctly.
     form.append("timestamps", "true");
 
     const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
@@ -254,7 +256,10 @@ async function transcribeVideo(videoPath: string): Promise<{
 
     const data = await res.json();
     const text = data.text || "";
-    const rawWords = data.words || [];
+
+    // Venice nests word timestamps under response.timestamps.word —
+    // NOT response.words.  Check both paths for forward-compatibility.
+    const rawWords = data.timestamps?.word || data.words || [];
 
     if (!Array.isArray(rawWords) || rawWords.length === 0) {
       // Service degraded — fallback to segment-less mode

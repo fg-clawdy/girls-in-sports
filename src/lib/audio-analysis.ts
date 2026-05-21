@@ -77,7 +77,10 @@ function parseTranscriptionResponse(data: any): {
   words: Array<{ word: string; start: number; end: number }>;
 } {
   const text = (data.text || "").trim();
-  const rawWords = data.words || [];
+
+  // Venice nests word timestamps under response.timestamps.word
+  // NOT response.words — this is a common pitfall.
+  const rawWords = data.timestamps?.word || data.words || [];
 
   if (!Array.isArray(rawWords) || rawWords.length === 0) {
     // Fallback: single segment with no timing
@@ -152,6 +155,8 @@ export async function transcribeWithVenice(
   formData.append("file", new Blob([audioBuffer], { type: "audio/wav" }), "audio.wav");
   formData.append("model", model);
   formData.append("response_format", "json");
+  // FormData values are always strings; "true" is the standard encoding
+  // for a boolean in multipart/form-data and Venice parses it correctly.
   formData.append("timestamps", "true");
 
   const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
