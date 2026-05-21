@@ -74,8 +74,8 @@ interface CampaignItem {
   targetFormat: string;
   energyPreset: string;
   createdAt: string;
-  proxyVideoUrl: string | null;
-  finalVideoUrl: string | null;
+  proxyAssetId: string | null;
+  finalAssetId: string | null;
 }
 
 // ── Constants ────────────────────────────────────────────────────────

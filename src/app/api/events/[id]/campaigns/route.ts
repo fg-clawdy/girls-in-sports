@@ -17,8 +17,8 @@ export async function GET(
         targetFormat: true,
         energyPreset: true,
         createdAt: true,
-        proxyVideoUrl: true,
-        finalVideoUrl: true,
+        proxyAssetId: true,
+        finalAssetId: true,
       },
     });
     return NextResponse.json({ campaigns });
