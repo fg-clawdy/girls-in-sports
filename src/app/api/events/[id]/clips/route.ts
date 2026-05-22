@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { TIER_FORMULAS, computeTieredScore } from "@/lib/tier-formulas";
 
 export async function GET(
   _request: Request,
@@ -13,21 +14,13 @@ export async function GET(
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
+    const tier = event.qualityTier ?? "PROFESSIONAL";
     const tierThreshold: Record<string, number> = {
       AMATEUR: 0,
       INTERMEDIATE: 25,
       PROFESSIONAL: 50,
     };
-    const threshold = tierThreshold[event.qualityTier] ?? 50;
-
-    // Select the tier-appropriate score for filtering
-    const tierScoreField = (() => {
-      switch (event.qualityTier) {
-        case "AMATEUR": return "amateurScore";
-        case "INTERMEDIATE": return "intermediateScore";
-        default: return "professionalScore";
-      }
-    })();
+    const threshold = tierThreshold[tier] ?? 50;
 
     const clips = await prisma.asset.findMany({
       where: {
@@ -37,22 +30,33 @@ export async function GET(
           { type: "SOURCE_VIDEO", status: "SCORED" },
         ],
         status: "SCORED",
-        clipScore: {
-          [tierScoreField]: { gte: threshold },
-        },
       },
       include: {
         clipScore: true,
         assetTags: true,
       },
-      orderBy: {
-        clipScore: {
-          [tierScoreField]: "desc",
-        },
-      },
     });
 
-    return NextResponse.json({ event, clips });
+    // Enrich each clip with tiered combined score and pass/fail
+    const enrichedClips = clips.map((clip) => {
+      const { combined, passes } = computeTieredScore(
+        clip.clipScore?.momentScore,
+        clip.clipScore?.productionScore,
+        tier
+      );
+      return {
+        ...clip,
+        tieredScore: combined,
+        tieredPasses: passes,
+      };
+    });
+
+    // Filter by threshold, sort by tieredScore desc
+    const filtered = enrichedClips
+      .filter((c) => c.tieredScore >= threshold)
+      .sort((a, b) => b.tieredScore - a.tieredScore);
+
+    return NextResponse.json({ event, clips: filtered, tier, formulas: TIER_FORMULAS });
   } catch (error) {
     console.error("GET /events/[id]/clips error:", error);
     return NextResponse.json(

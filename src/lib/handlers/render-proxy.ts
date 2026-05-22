@@ -240,18 +240,28 @@ async function cutSegment(
 }
 
 function runFfmpeg(args: string[]): Promise<void> {
+  const RENDER_TIMEOUT_MS = 600_000; // 10 minutes for proxy renders
+
   return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...args], { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      reject(new Error(`ffmpeg timed out after ${RENDER_TIMEOUT_MS}ms`));
+    }, RENDER_TIMEOUT_MS);
     proc.stderr.on("data", (d) => { stderr += d; });
     proc.on("close", (code) => {
+      clearTimeout(timer);
       if (code !== 0) {
         reject(new Error(`ffmpeg failed (${code}): ${stderr.slice(-800)}`));
       } else {
         resolve();
       }
     });
-    proc.on("error", (err) => reject(err));
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 

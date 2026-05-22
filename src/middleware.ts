@@ -12,7 +12,7 @@ const CLEANUP_INTERVAL_MS = 60000;
 
 // Default limits
 const DEFAULT_RATE = 60; // requests per minute
-const UPLOAD_RATE = 10;  // requests per minute for upload routes
+const UPLOAD_RATE = 30;  // requests per minute for upload routes
 
 function getRateLimit(path: string): number {
   if (path.includes("/upload")) return UPLOAD_RATE;

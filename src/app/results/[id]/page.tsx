@@ -14,6 +14,7 @@ interface GeneratedAssetDetail {
   status: string;
   createdAt: string;
   immichAssetId: string | null;
+  compositionScript?: string | null;
   event: {
     id: string;
     name: string;

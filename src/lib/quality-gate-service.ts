@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import * as sharp from "sharp";
+import sharp from "./sharp-wrapper";
 
 export interface QualityAnalysisResult {
   flags: string[];
@@ -79,7 +79,7 @@ async function getMeanBrightness(buffer: Buffer): Promise<number | undefined> {
     const channels = stats.channels;
     if (channels.length === 0) return undefined;
     const mean =
-      channels.reduce((sum, ch) => sum + ch.mean, 0) / channels.length;
+      channels.reduce((sum: number, ch: any) => sum + ch.mean, 0) / channels.length;
     return mean;
   } catch {
     return undefined;

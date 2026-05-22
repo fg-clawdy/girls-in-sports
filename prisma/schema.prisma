@@ -1,4 +1,3 @@
-// Girls In Sports - Prisma Schema
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,9 +6,333 @@ datasource db {
   provider = "postgresql"
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// US-003: Asset Intelligence Layer
-// ═══════════════════════════════════════════════════════════════════════════════
+model Event {
+  id              String           @id @default(cuid())
+  name            String
+  sport           String
+  city            String
+  eventDate       DateTime
+  description     String?
+  immichAlbumId   String?
+  thumbnailUrl    String?
+  userId          String?
+  status          EventStatus      @default(READY)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  qualityTier     QualityTier      @default(PROFESSIONAL)
+  assets          Asset[]
+  campaigns       Campaign[]
+  feedbackRatings FeedbackRating[]
+  generatedAssets GeneratedAsset[]
+
+  @@map("events")
+}
+
+model Asset {
+  id              String         @id @default(cuid())
+  eventId         String
+  immichAssetId   String?
+  type            AssetType
+  parentAssetId   String?
+  filePath        String?
+  durationSeconds Float?
+  widthPx         Int?
+  heightPx        Int?
+  fps             Float?
+  codec           String?
+  sizeBytes       Int?
+  status          AssetStatus    @default(UPLOADED)
+  ingestJobId     String?
+  createdAt       DateTime       @default(now())
+  assetTags       AssetTag[]
+  event           Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  parentAsset     Asset?         @relation("AssetParent", fields: [parentAssetId], references: [id])
+  childAssets     Asset[]        @relation("AssetParent")
+  campaignClips   CampaignClip[]
+  clipScore       ClipScore?
+
+  @@index([eventId])
+  @@index([immichAssetId])
+  @@index([parentAssetId])
+  @@map("assets")
+}
+
+model ClipScore {
+  id                String    @id @default(cuid())
+  assetId           String    @unique
+  visionScore       Float?
+  audioScore        Float?
+  motionScore       Float?
+  compositeScore    Float?
+  clipType          ClipType?
+  hasFaces          Boolean   @default(false)
+  hasCoachSpeech    Boolean   @default(false)
+  hasActionKeyword  Boolean   @default(false)
+  transcriptExcerpt String?
+  keywordHits       Json?
+  scoredAt          DateTime  @default(now())
+  amateurScore      Float?    @map("amateurscore")
+  intermediateScore Float?    @map("intermediatescore")
+  professionalScore Float?    @map("professionalscore")
+  momentScore       Float?    @map("momentscore")
+  productionScore   Float?    @map("productionscore")
+  asset             Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@map("clip_scores")
+}
+
+model AssetTag {
+  id         String         @id @default(cuid())
+  assetId    String
+  tag        String
+  source     AssetTagSource @default(GIS_AI)
+  confidence Float?
+  createdAt  DateTime       @default(now())
+  asset      Asset          @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, tag])
+  @@index([assetId])
+  @@index([tag])
+  @@map("asset_tags")
+}
+
+model Campaign {
+  id                      String                   @id @default(cuid())
+  eventId                 String
+  userId                  String?
+  name                    String
+  targetFormat            TargetFormat
+  energyPreset            EnergyPreset             @default(HYPE)
+  brief                   String?
+  status                  CampaignStatus           @default(DIRECTING)
+  scriptJson              Json?
+  musicUrl                String?
+  musicPrompt             String?
+  proxyAssetId            String?
+  finalAssetId            String?
+  selectedAssetIds        String[]
+  userFeedbackJson        Json?
+  createdAt               DateTime                 @default(now())
+  campaignClips           CampaignClip[]
+  campaignFeedbacks       CampaignFeedback[]
+  event                   Event                    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  feedbackAnalysisReports FeedbackAnalysisReport[]
+
+  @@index([eventId])
+  @@index([status])
+  @@map("campaigns")
+}
+
+model CampaignFeedback {
+  id               String   @id @default(cuid())
+  campaignId       String
+  productionWorthy Boolean
+  overallRating    Int
+  wouldChange      String?
+  clipSentiments   Json?
+  musicSatisfied   Boolean?
+  createdAt        DateTime @default(now())
+  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([createdAt])
+  @@map("campaign_feedbacks")
+}
+
+model FeedbackAnalysisReport {
+  id              String    @id @default(cuid())
+  campaignId      String?
+  generatedAt     DateTime  @default(now())
+  reportJson      Json
+  recommendations String
+  appliedAt       DateTime?
+  feedbackCount   Int       @default(0)
+  campaign        Campaign? @relation(fields: [campaignId], references: [id])
+
+  @@index([campaignId])
+  @@index([generatedAt])
+  @@map("feedback_analysis_reports")
+}
+
+model CampaignClip {
+  id                 String   @id @default(cuid())
+  campaignId         String
+  assetId            String
+  order              Int
+  startTimeMs        Int?
+  endTimeMs          Int?
+  narrativeLabel     String?
+  durationMultiplier Float    @default(1.0)
+  accepted           Boolean  @default(true)
+  mustInclude        Boolean  @default(false)
+  asset              Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  campaign           Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([assetId])
+  @@map("campaign_clips")
+}
+
+model GeneratedAsset {
+  id                   String                @id @default(cuid())
+  eventId              String
+  outputType           OutputType
+  fileName             String
+  filePath             String
+  fileSize             Int                   @default(0)
+  immichAssetId        String?
+  compositionScript    String?
+  costDIEM             Float?
+  status               GenerationStatus      @default(PENDING)
+  errorMessage         String?
+  createdAt            DateTime              @default(now())
+  completedAt          DateTime?
+  compositionFeedbacks CompositionFeedback[]
+  feedbackRatings      FeedbackRating[]
+  event                Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("generated_assets")
+}
+
+model SceneSegment {
+  id          String   @id @default(cuid())
+  parentId    String
+  eventId     String
+  startTime   Float
+  endTime     Float
+  duration    Float
+  motionScore Float
+  createdAt   DateTime @default(now())
+
+  @@index([parentId])
+  @@index([eventId])
+  @@map("scene_segments")
+}
+
+model CompositionFeedback {
+  id                   String         @id @default(cuid())
+  compositionId        String
+  productionWorthy     Boolean
+  ratings              Json?
+  userIntent           String?
+  generatedScript      Json?
+  musicPrompt          String?
+  musicModel           String?
+  selectedAssetIds     String[]
+  outputDuration       Float?
+  freeformNotes        String?
+  likedMost            String?
+  wouldChange          String?
+  estimatedImpressions Int?
+  costDIEM             Float?
+  createdAt            DateTime       @default(now())
+  generatedAsset       GeneratedAsset @relation(fields: [compositionId], references: [id], onDelete: Cascade)
+
+  @@index([compositionId])
+  @@index([createdAt])
+  @@map("composition_feedbacks")
+}
+
+model FeedbackRating {
+  id               String          @id @default(cuid())
+  eventId          String
+  sourceAssetId    String
+  generatedAssetId String?
+  rating           RatingType
+  createdAt        DateTime        @default(now())
+  event            Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  generatedAsset   GeneratedAsset? @relation(fields: [generatedAssetId], references: [id])
+
+  @@map("feedback_ratings")
+}
+
+model AssetQualityFlag {
+  id         String   @id @default(cuid())
+  assetId    String
+  eventId    String
+  flags      String[]
+  brightness Float?
+  fileSize   Int
+  duration   Float?
+  createdAt  DateTime @default(now())
+
+  @@index([eventId])
+  @@index([assetId])
+  @@map("asset_quality_flags")
+}
+
+model WeeklyCritique {
+  id                  String   @id @default(cuid())
+  weekStart           DateTime
+  weekEnd             DateTime
+  totalFeedback       Int
+  avgProductionWorthy Float?
+  avgRatings          Json?
+  topIssues           String[]
+  topLiked            String[]
+  topChanges          String[]
+  critiqueText        String
+  actionItems         String[]
+  modelUsed           String
+  costDIEM            Float?
+  createdAt           DateTime @default(now())
+
+  @@index([weekStart])
+  @@map("weekly_critiques")
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  type        JobType
+  status      JobStatus @default(QUEUED)
+  payload     Json?
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  error       String?
+  retryAfter  DateTime?
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  parentJobId String?
+  parentJob   Job?      @relation("JobParent", fields: [parentJobId], references: [id])
+  childJobs   Job[]     @relation("JobParent")
+
+  @@index([status])
+  @@index([status, retryAfter])
+  @@index([parentJobId])
+  @@map("jobs")
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userId    String?
+  createdAt DateTime @default(now())
+
+  @@map("push_subscriptions")
+}
+
+model PreFilterScore {
+  id               String   @id @default(cuid())
+  assetId          String
+  eventId          String
+  brightnessScore  Int?
+  blurScore        Int?
+  faceScore        Int?
+  actionScore      Int?
+  compositionScore Int?
+  overallScore     Int?
+  passedFilter     Boolean  @default(false)
+  featuresJson     Json?
+  createdAt        DateTime @default(now())
+
+  @@index([assetId])
+  @@index([eventId])
+  @@index([overallScore])
+  @@map("pre_filter_scores")
+}
 
 enum EventStatus {
   UPLOADING
@@ -23,34 +346,6 @@ enum QualityTier {
   INTERMEDIATE
   PROFESSIONAL
 }
-
-model Event {
-  id          String   @id @default(cuid())
-  name        String
-  sport       String
-  city        String
-  eventDate   DateTime
-  description String?
-  immichAlbumId String?
-  thumbnailUrl  String?
-  userId      String?
-  status      EventStatus @default(READY)
-  qualityTier QualityTier @default(AMATEUR)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  // Legacy relations (preserved for zero data loss)
-  generatedAssets GeneratedAsset[]
-  feedbackRatings FeedbackRating[]
-
-  // New asset intelligence layer
-  assets      Asset[]
-  campaigns   Campaign[]
-
-  @@map("events")
-}
-
-// ── Asset Types ──
 
 enum AssetType {
   SOURCE_VIDEO
@@ -67,38 +362,6 @@ enum AssetStatus {
   FAILED
 }
 
-model Asset {
-  id            String     @id @default(cuid())
-  eventId       String
-  event         Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  immichAssetId String?
-  type          AssetType
-  parentAssetId String?
-  parentAsset   Asset?     @relation("AssetParent", fields: [parentAssetId], references: [id])
-  childAssets   Asset[]    @relation("AssetParent")
-  filePath      String?
-  durationSeconds Float?
-  widthPx       Int?
-  heightPx      Int?
-  fps           Float?
-  codec         String?
-  sizeBytes     Int?
-  status        AssetStatus @default(UPLOADED)
-  ingestJobId   String?
-  createdAt     DateTime   @default(now())
-
-  clipScore     ClipScore?
-  assetTags     AssetTag[]
-  campaignClips CampaignClip[]
-
-  @@index([eventId])
-  @@index([immichAssetId])
-  @@index([parentAssetId])
-  @@map("assets")
-}
-
-// ── Clip Scoring ──
-
 enum ClipType {
   ACTION
   SPEECH
@@ -106,53 +369,11 @@ enum ClipType {
   MONTAGE
 }
 
-model ClipScore {
-  id               String   @id @default(cuid())
-  assetId          String   @unique
-  asset            Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  visionScore      Float?
-  audioScore       Float?
-  motionScore      Float?
-  compositeScore   Float?
-  amateurScore     Float?   @map("amateurscore")
-  intermediateScore Float?  @map("intermediatescore")
-  professionalScore Float?  @map("professionalscore")
-  clipType         ClipType?
-  hasFaces         Boolean  @default(false)
-  hasCoachSpeech   Boolean  @default(false)
-  hasActionKeyword Boolean  @default(false)
-  transcriptExcerpt String?
-  keywordHits      Json?    // { keyword: string, count: number }[]
-  sttWords         Json?    // [{ word: string, start: number, end: number }, ...]
-  scoredAt         DateTime @default(now())
-
-  @@map("clip_scores")
-}
-
-// ── Asset Tags ──
-
 enum AssetTagSource {
   GIS_AI
   USER_MANUAL
   IMMICH_CLIP
 }
-
-model AssetTag {
-  id         String       @id @default(cuid())
-  assetId    String
-  asset      Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  tag        String
-  source     AssetTagSource @default(GIS_AI)
-  confidence Float?
-  createdAt  DateTime     @default(now())
-
-  @@unique([assetId, tag])
-  @@index([assetId])
-  @@index([tag])
-  @@map("asset_tags")
-}
-
-// ── Campaigns ──
 
 enum TargetFormat {
   REEL_15
@@ -180,167 +401,6 @@ enum CampaignStatus {
   FAILED
 }
 
-model Campaign {
-  id             String         @id @default(cuid())
-  eventId        String
-  event          Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  userId         String?
-  name           String
-  targetFormat   TargetFormat
-  energyPreset   EnergyPreset   @default(HYPE)
-  brief          String?
-  status         CampaignStatus @default(DIRECTING)
-  scriptJson     Json?          // ProductionScript
-  musicUrl       String?
-  musicPrompt    String?
-  proxyAssetId   String?
-  finalAssetId   String?
-  selectedAssetIds String[]       // assetIds accepted into campaign
-  userFeedbackJson Json?
-  createdAt      DateTime       @default(now())
-
-  campaignClips  CampaignClip[]
-  campaignFeedbacks CampaignFeedback[]
-  feedbackAnalysisReports FeedbackAnalysisReport[]
-
-  @@index([eventId])
-  @@index([status])
-  @@map("campaigns")
-}
-
-model CampaignFeedback {
-  id               String   @id @default(cuid())
-  campaignId       String
-  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  productionWorthy Boolean
-  overallRating    Int      // 1–5
-  wouldChange      String?  @db.Text
-  clipSentiments   Json?    // { assetId: string; sentiment: string }[]
-  musicSatisfied   Boolean?
-  createdAt        DateTime @default(now())
-
-  @@index([campaignId])
-  @@index([createdAt])
-  @@map("campaign_feedbacks")
-}
-
-model FeedbackAnalysisReport {
-  id             String   @id @default(cuid())
-  campaignId     String?
-  campaign       Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
-  generatedAt    DateTime @default(now())
-  reportJson     Json     // Raw aggregated data
-  recommendations String   @db.Text
-  appliedAt      DateTime?
-  feedbackCount  Int      @default(0) // How many feedback records analyzed
-
-  @@index([campaignId])
-  @@index([generatedAt])
-  @@map("feedback_analysis_reports")
-}
-
-model CampaignClip {
-  id                 String   @id @default(cuid())
-  campaignId         String
-  campaign           Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  assetId            String
-  asset              Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  order              Int
-  startTimeMs        Int?
-  endTimeMs          Int?
-  narrativeLabel     String?
-  durationMultiplier Float    @default(1.0)
-  accepted           Boolean  @default(true)
-  mustInclude        Boolean  @default(false)
-
-  @@index([campaignId])
-  @@index([assetId])
-  @@map("campaign_clips")
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Legacy Models (preserved for zero data loss — to be deprecated in future migration)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-model GeneratedAsset {
-  id           String      @id @default(cuid())
-  eventId      String
-  event        Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  outputType   OutputType
-  fileName     String
-  filePath     String
-  fileSize     Int         @default(0)
-  immichAssetId String?
-  compositionScript String? @db.Text
-  costDIEM     Float?
-  status       GenerationStatus @default(PENDING)
-  errorMessage String?
-  createdAt    DateTime    @default(now())
-  completedAt  DateTime?
-
-  feedbackRatings FeedbackRating[]
-  compositionFeedbacks CompositionFeedback[]
-
-  @@map("generated_assets")
-}
-
-model SceneSegment {
-  id          String   @id @default(cuid())
-  parentId    String
-  eventId     String
-  startTime   Float
-  endTime     Float
-  duration    Float
-  motionScore Float
-  createdAt   DateTime @default(now())
-
-  @@index([parentId])
-  @@index([eventId])
-  @@map("scene_segments")
-}
-
-model CompositionFeedback {
-  id                 String   @id @default(cuid())
-  compositionId      String
-  generatedAsset     GeneratedAsset @relation(fields: [compositionId], references: [id], onDelete: Cascade)
-
-  productionWorthy   Boolean
-  ratings            Json?
-
-  userIntent         String?  @db.Text
-  generatedScript    Json?
-  musicPrompt        String?  @db.Text
-  musicModel         String?
-  selectedAssetIds   String[]
-  outputDuration     Float?
-
-  freeformNotes      String?  @db.Text
-  likedMost          String?
-  wouldChange        String?
-
-  estimatedImpressions Int?
-  costDIEM           Float?
-
-  createdAt          DateTime @default(now())
-
-  @@index([compositionId])
-  @@index([createdAt])
-  @@map("composition_feedbacks")
-}
-
-model FeedbackRating {
-  id         String        @id @default(cuid())
-  eventId    String
-  event      Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  sourceAssetId String
-  generatedAssetId String?
-  generatedAsset GeneratedAsset? @relation(fields: [generatedAssetId], references: [id], onDelete: SetNull)
-  rating     RatingType
-  createdAt  DateTime      @default(now())
-
-  @@map("feedback_ratings")
-}
-
 enum OutputType {
   COLLAGE_POSTER
   HIGHLIGHT_VIDEO_15S
@@ -359,50 +419,6 @@ enum RatingType {
   NEGATIVE
 }
 
-model AssetQualityFlag {
-  id         String   @id @default(cuid())
-  assetId    String
-  eventId    String
-  flags      String[]
-  brightness Float?
-  fileSize   Int
-  duration   Float?
-  createdAt  DateTime @default(now())
-
-  @@index([eventId])
-  @@index([assetId])
-  @@map("asset_quality_flags")
-}
-
-model WeeklyCritique {
-  id              String   @id @default(cuid())
-  weekStart       DateTime
-  weekEnd         DateTime
-  totalFeedback   Int
-  avgProductionWorthy Float?
-
-  avgRatings      Json?
-
-  topIssues       String[]
-  topLiked        String[]
-  topChanges      String[]
-
-  critiqueText    String   @db.Text
-  actionItems     String[]
-
-  modelUsed       String
-  costDIEM        Float?
-
-  createdAt       DateTime @default(now())
-
-  @@index([weekStart])
-  @@map("weekly_critiques")
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// US-001: Persistent async job queue
-// ═══════════════════════════════════════════════════════════════════════════════
-
 enum JobType {
   INGEST_CLIP
   SCORE_CLIP
@@ -418,71 +434,4 @@ enum JobStatus {
   DONE
   FAILED
   RETRYING
-}
-
-model Job {
-  id          String    @id @default(cuid())
-  type        JobType
-  status      JobStatus @default(QUEUED)
-  payload     Json?
-  attempts    Int       @default(0)
-  maxAttempts Int       @default(3)
-  error       String?
-  retryAfter  DateTime?
-  createdAt   DateTime  @default(now())
-  startedAt   DateTime?
-  completedAt DateTime?
-  parentJobId String?
-  parentJob   Job?      @relation("JobParent", fields: [parentJobId], references: [id])
-  childJobs   Job[]     @relation("JobParent")
-
-  @@index([status])
-  @@index([status, retryAfter])
-  @@index([parentJobId])
-  @@map("jobs")
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// US-002: Push Subscription table
-// ═══════════════════════════════════════════════════════════════════════════════
-
-model PushSubscription {
-  id        String   @id @default(cuid())
-  endpoint  String   @unique
-  p256dh    String
-  auth      String
-  userId    String?
-  createdAt DateTime @default(now())
-
-  @@map("push_subscriptions")
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// US-014: Lightweight Local Pre-Filter Model
-// Phase A: Fast image analysis using sharp + simple heuristics
-// Phase B (future): ONNX runtime with a distilled vision model
-// ═══════════════════════════════════════════════════════════════════════════════
-
-model PreFilterScore {
-  id          String   @id @default(cuid())
-  assetId     String
-  eventId     String
-
-  brightnessScore  Int?
-  blurScore        Int?
-  faceScore        Int?
-  actionScore      Int?
-  compositionScore Int?
-  overallScore     Int?
-
-  passedFilter Boolean @default(false)
-
-  featuresJson Json?
-
-  createdAt   DateTime @default(now())
-
-  @@index([assetId])
-  @@index([eventId])
-  @@index([overallScore])
-  @@map("pre_filter_scores")
 }

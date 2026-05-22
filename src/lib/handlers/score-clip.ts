@@ -4,6 +4,7 @@ import { promises as fs, readFileSync } from "fs";
 import { join } from "path";
 import { prisma } from "../prisma";
 import { downloadAssetToFile, updateAssetDescription } from "../immich";
+import { computeTieredScore, TIER_FORMULAS } from "../tier-formulas";
 
 interface ScoreClipPayload {
   assetId: string;
@@ -49,7 +50,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
 
     // ── 2. Run STT on raw video ──
     const sttResult = await transcribeVideo(sourcePath);
-    const { transcript, segments: sttSegments, words: sttWords } = sttResult;
+    const { transcript, segments: sttSegments } = sttResult;
 
     // ── 3. Compute audio/keyword score ──
     const keywords = SPORT_KEYWORDS[sport] || SPORT_KEYWORDS.default;
@@ -59,57 +60,52 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       keywords
     );
 
-    // ── 4. Extract keyframes ──
-    const frameCount = duration <= 10 ? 3 : duration <= 30 ? 6 : 12;
+    // ── 4. Compute motion score EARLY (for clipType + dynamic frame strategy — proposal B) ──
+    const motionScore = await computeMotionScore(sourcePath);
+
+    // ── 5. Early clipType (used for type-driven frame extraction) ──
+    let clipType = assignClipType(motionScore, audioScore);
+
+    // ── 6. Dynamic frame count based on clipType + duration (ACTION gets scene+midpoints, SPEECH gets 2-3 even) ──
+    let frameCount = 3;
+    if (clipType === ClipType.ACTION || clipType === ClipType.MIXED) {
+      frameCount = duration <= 10 ? 6 : 12;
+    } else if (clipType === ClipType.SPEECH) {
+      frameCount = 3;
+    } else {
+      frameCount = duration <= 10 ? 3 : duration <= 30 ? 6 : 12;
+    }
+
     const framesDir = join(tmpDir, "frames");
     await fs.mkdir(framesDir, { recursive: true });
     const framePaths = await extractKeyframes(sourcePath, framesDir, frameCount, duration);
 
-    // ── 5. Vision analysis on keyframes ──
-    let amateurScore = 0;
-    let intermediateScore = 0;
-    let professionalScore = 0;
-    let faceCount = 0;
-    let hasFaces = false;
-    let actionClarity = 0;
-    let subjectCentering = 0;
-    let brandVisibility = false;
+    // ── 7. Vision analysis on keyframes — ONLY momentScore + productionScore (proposal A) ──
+    let momentScore = 0;
+    let productionScore = 0;
+    let hasFaces = false; // simplified: no longer returned by vision (can be enhanced with local face detection later)
 
     if (VENICE_API_KEY && framePaths.length > 0) {
       const visionResults = await analyzeKeyframesWithVision(framePaths, sport);
-      amateurScore = visionResults.amateurScore;
-      intermediateScore = visionResults.intermediateScore;
-      professionalScore = visionResults.professionalScore;
-      faceCount = visionResults.faceCount;
-      hasFaces = faceCount > 0;
-      actionClarity = visionResults.actionClarity;
-      subjectCentering = visionResults.subjectCentering;
-      brandVisibility = visionResults.brandVisibility;
+      momentScore = visionResults.momentScore;
+      productionScore = visionResults.productionScore;
     }
 
-    // ── 6. Compute motion score locally ──
-    const motionScore = await computeMotionScore(sourcePath);
-
-    // ── 7. Composite score (legacy: keeps the old overall for backwards compat) ──
-    const composite = Math.round(
-      amateurScore * 0.50 + audioScore * 0.30 + motionScore * 0.20
-    );
-
-    // ── 8. Assign clipType ──
-    const clipType = assignClipType(motionScore, audioScore);
+    // ── 8. Tiered compositeScore using event.qualityTier + transparent TIER_FORMULAS (proposal C + D) ──
+    const eventTier = asset.event?.qualityTier ?? "PROFESSIONAL";
+    const { combined: composite } = computeTieredScore(momentScore, productionScore, eventTier);
 
     // ── 9. Upsert ClipScore record (allows re-runs) ──
     await prisma.clipScore.upsert({
       where: { assetId },
       create: {
         assetId,
-        visionScore: Math.round(professionalScore),
+        visionScore: Math.round(productionScore),
         audioScore: Math.round(audioScore),
         motionScore: Math.round(motionScore),
+        momentScore,
+        productionScore,
         compositeScore: composite,
-        amateurScore,
-        intermediateScore,
-        professionalScore,
         clipType,
         hasFaces,
         hasCoachSpeech,
@@ -118,16 +114,14 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         ),
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
-        sttWords: sttWords.length > 0 ? JSON.stringify(sttWords) : undefined,
       },
       update: {
-        visionScore: Math.round(professionalScore),
+        visionScore: Math.round(productionScore),
         audioScore: Math.round(audioScore),
         motionScore: Math.round(motionScore),
+        momentScore,
+        productionScore,
         compositeScore: composite,
-        amateurScore,
-        intermediateScore,
-        professionalScore,
         clipType,
         hasFaces,
         hasCoachSpeech,
@@ -136,7 +130,6 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         ),
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
-        sttWords: sttWords.length > 0 ? JSON.stringify(sttWords) : undefined,
       },
     });
 
@@ -317,8 +310,10 @@ async function transcribeVideo(videoPath: string): Promise<{
 }
 
 async function extractAudioToWav(videoPath: string, audioPath: string): Promise<void> {
+  const AUDIO_TIMEOUT_MS = 300_000; // 5 minutes
+
   return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", [
+    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
       "-i", videoPath,
       "-vn",
       "-ar", "16000",
@@ -326,10 +321,15 @@ async function extractAudioToWav(videoPath: string, audioPath: string): Promise<
       "-c:a", "pcm_s16le",
       "-y",
       audioPath,
-    ]);
+    ]]);
     let stderr = "";
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      reject(new Error(`Audio extraction timed out after ${AUDIO_TIMEOUT_MS}ms`));
+    }, AUDIO_TIMEOUT_MS);
     proc.stderr.on("data", (d) => { stderr += d; });
     proc.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error(`Audio extraction failed: ${stderr.slice(-500)}`));
     });
@@ -372,29 +372,98 @@ function computeAudioScore(
   return { audioScore: Math.round(score), keywordHits: hits, hasCoachSpeech };
 }
 
-// ── Keyframe extraction ──
+// ── Keyframe extraction (scene-cut aware) ──
+async function detectSceneChanges(videoPath: string): Promise<number[]> {
+  const SCENE_TIMEOUT_MS = 300_000; // 5 minutes
+
+  return new Promise((resolve) => {
+    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
+      "-i", videoPath,
+      "-vf", "select='gt(scene,0.2)',showinfo",
+      "-an", "-f", "null", "-",
+    ]]);
+    let stderr = "";
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      resolve([]);
+    }, SCENE_TIMEOUT_MS);
+    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.on("close", () => {
+      clearTimeout(timer);
+      const timestamps: number[] = [];
+      const regex = /pts_time:\s*([\d.]+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(stderr)) !== null) {
+        const t = parseFloat(m[1]);
+        if (!isNaN(t)) timestamps.push(t);
+      }
+      resolve(timestamps);
+    });
+    proc.on("error", () => {
+      clearTimeout(timer);
+      resolve([]);
+    });
+  });
+}
+
 async function extractKeyframes(
   videoPath: string,
   outputDir: string,
-  count: number,
+  maxFrames: number,
   duration: number
 ): Promise<string[]> {
-  const paths: string[] = [];
-  const interval = duration / (count + 1);
+  // 1. Detect scene changes for smarter frame selection
+  const sceneChanges = await detectSceneChanges(videoPath);
 
-  for (let i = 1; i <= count; i++) {
-    const time = interval * i;
+  // 2. Build frame timestamps: scene changes + midpoints between scenes
+  let timestamps: number[] = [];
+  if (sceneChanges.length >= 2 && sceneChanges.length <= maxFrames * 2) {
+    // Use scene changes + midpoints for action clips
+    for (let i = 0; i < sceneChanges.length; i++) {
+      timestamps.push(sceneChanges[i]);
+      if (i < sceneChanges.length - 1) {
+        const midpoint = (sceneChanges[i] + sceneChanges[i + 1]) / 2;
+        timestamps.push(midpoint);
+      }
+    }
+  } else if (sceneChanges.length > 0) {
+    // Too many scene changes — pick evenly from the scene change list
+    const step = sceneChanges.length / maxFrames;
+    for (let i = 0; i < maxFrames; i++) {
+      timestamps.push(sceneChanges[Math.floor(i * step)]);
+    }
+  } else {
+    // No scene changes (static/speech clip) — evenly spaced
+    const interval = duration / (maxFrames + 1);
+    for (let i = 1; i <= maxFrames; i++) {
+      timestamps.push(interval * i);
+    }
+  }
+
+  // 3. Deduplicate and sort
+  timestamps = Array.from(new Set(timestamps.map((t) => Math.round(t * 100) / 100))).sort((a, b) => a - b);
+
+  // 4. Extract frames
+  const paths: string[] = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    const time = timestamps[i];
     const outPath = join(outputDir, `frame_${i}.jpg`);
+    const FRAME_TIMEOUT_MS = 60_000; // 1 minute per frame
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn("ffmpeg", [
+      const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
         "-ss", time.toFixed(3),
         "-i", videoPath,
         "-frames:v", "1",
         "-q:v", "2",
         "-y",
         outPath,
-      ]);
+      ]]);
+      const timer = setTimeout(() => {
+        proc.kill("SIGTERM");
+        reject(new Error(`Keyframe extraction timed out at ${time}s`));
+      }, FRAME_TIMEOUT_MS);
       proc.on("close", (code) => {
+        clearTimeout(timer);
         if (code === 0) resolve();
         else reject(new Error(`Keyframe extraction failed at ${time}s`));
       });
@@ -405,41 +474,25 @@ async function extractKeyframes(
   return paths;
 }
 
-// ── Vision analysis on keyframes (batched) ──
 async function analyzeKeyframesWithVision(
   framePaths: string[],
   sport: string
 ): Promise<{
-  amateurScore: number;
-  intermediateScore: number;
-  professionalScore: number;
-  faceCount: number;
-  actionClarity: number;
-  subjectCentering: number;
-  brandVisibility: boolean;
+  momentScore: number;
+  productionScore: number;
 }> {
   const SYSTEM_PROMPT = `You are a sports media evaluator for Girls In Sports.
 Analyze the provided keyframes from a youth sports video clip.
-Return ONLY a valid JSON object with these fields:
-- amateurScore (0-100): Parent-shot iPhone footage. Generous grading — good action, visible faces, decent lighting are acceptable. Minor shake and noise are expected.
-- intermediateScore (0-100): Enthusiast-level footage. Some intentionality in framing, reasonable lighting, and clear action. Not pro-grade but deliberate.
-- professionalScore (0-100): Broadcast production standards. Stable gimbal/tripod, professional lighting, clean audio, cinematic framing.
-- faceCount (int): Number of visible faces
-- actionClarity (0-100): How clear the sports action is
-- subjectCentering (0-100): How well subjects are framed
-- brandVisibility (bool): Whether GIS branding/logos are visible
+Return ONLY a valid JSON object with these two fields:
+- momentScore (0-100): Rate the CAPTURED MOMENT. Consider: faces visible, emotion present, sports action happening, story being told, energy level, peak action captured. This is about WHAT the clip captured, not how pretty it looks.
+- productionScore (0-100): Rate the TECHNICAL QUALITY. Consider: camera stability, lighting quality, exposure, framing, noise/grain, focus sharpness, color balance. This is about HOW the clip looks.
 
 Return ONLY the JSON object, no markdown, no explanations.`;
 
   // Read frames in batches of 3
   const batchSize = 3;
-  const amateurScores: number[] = [];
-  const intermediateScores: number[] = [];
-  const professionalScores: number[] = [];
-  let totalFaceCount = 0;
-  let totalActionClarity = 0;
-  let totalSubjectCentering = 0;
-  let anyBrandVisible = false;
+  const momentScores: number[] = [];
+  const productionScores: number[] = [];
 
   for (let i = 0; i < framePaths.length; i += batchSize) {
     const batch = framePaths.slice(i, i + batchSize);
@@ -449,7 +502,7 @@ Return ONLY the JSON object, no markdown, no explanations.`;
     });
 
     const content: any[] = [
-      { type: "text", text: `Analyze ${batch.length} keyframes from a ${sport} clip. Return JSON with amateurScore, intermediateScore, professionalScore.` },
+      { type: "text", text: `Analyze ${batch.length} keyframes from a ${sport} clip. Return JSON with momentScore and productionScore only.` },
     ];
     for (const img of images) {
       content.push({ type: "image_url", image_url: { url: img } });
@@ -467,7 +520,7 @@ Return ONLY the JSON object, no markdown, no explanations.`;
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content },
         ],
-        max_tokens: 800,
+        max_tokens: 300,
         temperature: 0.2,
       }),
     });
@@ -484,38 +537,24 @@ Return ONLY the JSON object, no markdown, no explanations.`;
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
 
-      amateurScores.push(Math.min(100, Math.max(0, Number(parsed.amateurScore) || 50)));
-      intermediateScores.push(Math.min(100, Math.max(0, Number(parsed.intermediateScore) || 40)));
-      professionalScores.push(Math.min(100, Math.max(0, Number(parsed.professionalScore) || 30)));
-
-      totalFaceCount += Math.max(0, Number(parsed.faceCount) || 0);
-      totalActionClarity += Math.min(100, Math.max(0, Number(parsed.actionClarity) || 50));
-      totalSubjectCentering += Math.min(100, Math.max(0, Number(parsed.subjectCentering) || 50));
-      if (parsed.brandVisibility === true) anyBrandVisible = true;
+      momentScores.push(Math.min(100, Math.max(0, Number(parsed.momentScore) || 50)));
+      productionScores.push(Math.min(100, Math.max(0, Number(parsed.productionScore) || 40)));
     } catch (e) {
       console.warn("Failed to parse vision response:", raw.slice(0, 200));
       // Fallback: use a safe spread
-      amateurScores.push(50);
-      intermediateScores.push(40);
-      professionalScores.push(30);
+      momentScores.push(50);
+      productionScores.push(40);
     }
   }
 
-  const avgAmateur = amateurScores.length > 0
-    ? amateurScores.reduce((a, b) => a + b, 0) / amateurScores.length : 50;
-  const avgIntermediate = intermediateScores.length > 0
-    ? intermediateScores.reduce((a, b) => a + b, 0) / intermediateScores.length : 40;
-  const avgProfessional = professionalScores.length > 0
-    ? professionalScores.reduce((a, b) => a + b, 0) / professionalScores.length : 30;
+  const avgMoment = momentScores.length > 0
+    ? momentScores.reduce((a, b) => a + b, 0) / momentScores.length : 50;
+  const avgProduction = productionScores.length > 0
+    ? productionScores.reduce((a, b) => a + b, 0) / productionScores.length : 40;
 
   return {
-    amateurScore: Math.round(avgAmateur),
-    intermediateScore: Math.round(avgIntermediate),
-    professionalScore: Math.round(avgProfessional),
-    faceCount: totalFaceCount,
-    actionClarity: Math.round(totalActionClarity / Math.max(amateurScores.length, 1)),
-    subjectCentering: Math.round(totalSubjectCentering / Math.max(amateurScores.length, 1)),
-    brandVisibility: anyBrandVisible,
+    momentScore: Math.round(avgMoment),
+    productionScore: Math.round(avgProduction),
   };
 }
 

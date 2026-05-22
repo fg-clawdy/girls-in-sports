@@ -4,7 +4,7 @@
 // Runs before expensive vision API calls to skip clearly poor images.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import * as sharp from "sharp";
+import sharp from "./sharp-wrapper";
 import { prisma } from "./prisma";
 
 export interface PreFilterFeatures {
@@ -44,7 +44,7 @@ export async function analyzeImageFeatures(
   const img = sharp(imagePath);
   const metadata = await img.metadata();
   const { data, info } = await img
-    .greyscale()
+    .grayscale()
     .raw()
     .toBuffer({ resolveWithObject: true });
 

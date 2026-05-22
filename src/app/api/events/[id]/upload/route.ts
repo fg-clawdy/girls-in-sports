@@ -47,7 +47,8 @@ export async function POST(
         const immichForm = new FormData();
         immichForm.append(
           "assetData",
-          new Blob([await file.arrayBuffer()], { type: file.type }),
+          // File extends Blob — pass directly to avoid loading entire file into memory
+          file,
           file.name
         );
         immichForm.append("deviceAssetId", `${file.name}-${Date.now()}`);

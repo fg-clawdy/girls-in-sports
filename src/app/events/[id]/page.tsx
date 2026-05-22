@@ -44,15 +44,16 @@ interface ClipData {
   status: string;
   clipScore: {
     compositeScore: number | null;
-    amateurScore: number | null;
-    intermediateScore: number | null;
-    professionalScore: number | null;
+    momentScore: number | null;
+    productionScore: number | null;
     clipType: string | null;
     visionScore: number | null;
     audioScore: number | null;
     motionScore: number | null;
     transcriptExcerpt: string | null;
   } | null;
+  tieredScore?: number;
+  tieredPasses?: boolean;
   assetTags: Array<{ tag: string; source: string; confidence: number | null }>;
 }
 
@@ -199,6 +200,7 @@ export default function EventPage() {
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const [showUploadToast, setShowUploadToast] = useState(false);
+  const [uploadFileCount, setUploadFileCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Curate ──
@@ -266,18 +268,9 @@ export default function EventPage() {
       if (!res.ok) throw new Error("Failed to load clips");
       const data = await res.json();
       setClips(data.clips || []);
-      const threshold = getTierThreshold(data.event?.qualityTier ?? "PROFESSIONAL");
-      const tier = data.event?.qualityTier ?? "PROFESSIONAL";
       const map: Record<string, boolean> = {};
       data.clips.forEach((c: ClipData) => {
-        const score = (() => {
-          switch (tier) {
-            case "AMATEUR": return c.clipScore?.amateurScore ?? 0;
-            case "INTERMEDIATE": return c.clipScore?.intermediateScore ?? 0;
-            default: return c.clipScore?.professionalScore ?? 0;
-          }
-        })();
-        map[c.id] = (score) >= threshold;
+        map[c.id] = c.tieredPasses ?? false;
       });
       setAcceptedMap(map);
     } catch {
@@ -342,9 +335,14 @@ export default function EventPage() {
 
   const handleUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (files.length > 30) {
+      setUploadErrors((prev) => [...prev, `Too many files selected. Maximum is 30 per batch (you selected ${files.length}). Please split into smaller batches.`]);
+      return;
+    }
     setUploading(true);
     setUploadErrors([]);
     setUploadProgress({});
+    setUploadFileCount(files.length);
     const fileList = Array.from(files);
     try {
       await Promise.all(
@@ -419,14 +417,7 @@ export default function EventPage() {
 
   const sortedClips = [...filteredClips].sort((a, b) => {
     if (sortBy === "score") {
-      const getTieredScore = (c: ClipData) => {
-        switch (event?.qualityTier) {
-          case "AMATEUR": return c.clipScore?.amateurScore ?? 0;
-          case "INTERMEDIATE": return c.clipScore?.intermediateScore ?? 0;
-          default: return c.clipScore?.professionalScore ?? 0;
-        }
-      };
-      return getTieredScore(b) - getTieredScore(a);
+      return (b.tieredScore ?? 0) - (a.tieredScore ?? 0);
     }
     if (sortBy === "duration") {
       return (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0);
@@ -640,7 +631,7 @@ export default function EventPage() {
                 disabled={uploading}
                 className="px-4 py-2 rounded-md text-sm font-medium bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-40 transition-opacity"
               >
-                {uploading ? "Uploading..." : "+ Choose Files"}
+                {uploading ? "Uploading..." : "+ Choose Files (max 30)"}
               </button>
               <p className="text-sm text-zinc-500">or drag and drop files here</p>
             </div>
@@ -911,14 +902,7 @@ export default function EventPage() {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
                   {sortedClips.map((clip) => {
-                    const getDisplayScore = (c: ClipData) => {
-                      switch (event?.qualityTier) {
-                        case "AMATEUR": return c.clipScore?.amateurScore ?? null;
-                        case "INTERMEDIATE": return c.clipScore?.intermediateScore ?? null;
-                        default: return c.clipScore?.professionalScore ?? null;
-                      }
-                    };
-                    const score = getDisplayScore(clip);
+                    const score = clip.tieredScore ?? null;
                     const type = clip.clipScore?.clipType ?? "UNKNOWN";
                     const accepted = acceptedMap[clip.id] ?? false;
                     const must = mustIncludeMap[clip.id] ?? false;
@@ -965,15 +949,12 @@ export default function EventPage() {
                             <span className="text-xs font-semibold text-zinc-700 uppercase tracking-wide">
                               {type}
                             </span>
-                            <div className="flex items-center gap-1">
-                              <span className="text-[10px] text-zinc-400">
-                                V:{(clip.clipScore?.visionScore ?? 0).toFixed(0)}
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] text-zinc-500">
+                                M:{(clip.clipScore?.momentScore ?? 0).toFixed(0)}
                               </span>
-                              <span className="text-[10px] text-zinc-400">
-                                A:{(clip.clipScore?.audioScore ?? 0).toFixed(0)}
-                              </span>
-                              <span className="text-[10px] text-zinc-400">
-                                M:{(clip.clipScore?.motionScore ?? 0).toFixed(0)}
+                              <span className="text-[10px] text-zinc-500">
+                                P:{(clip.clipScore?.productionScore ?? 0).toFixed(0)}
                               </span>
                             </div>
                           </div>

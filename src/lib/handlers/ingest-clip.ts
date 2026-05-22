@@ -180,14 +180,14 @@ async function ffprobe(path: string): Promise<{
   codec: string;
 }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("ffprobe", [
+    const proc = spawn("nice", ["-n", "10", "ffprobe", ...[
       "-v", "error",
       "-select_streams", "v:0",
       "-show_entries", "stream=width,height,r_frame_rate,codec_name",
       "-show_entries", "format=duration",
       "-of", "json",
       path,
-    ]);
+    ]]);
 
     let stdout = "";
     let stderr = "";
@@ -228,19 +228,25 @@ async function detectScenes(
   videoPath: string,
   totalDuration: number
 ): Promise<Array<{ start: number; end: number }>> {
-  const sceneCmd = spawn("ffmpeg", [
+  const SCENE_TIMEOUT_MS = 600_000; // 10 minutes
+
+  const sceneCmd = spawn("nice", ["-n", "10", "ffmpeg", ...[
     "-i", videoPath,
     "-vf", `select='gt(scene,${SCENE_THRESHOLD})',showinfo`,
     "-an",
     "-f", "null",
     "-",
-  ]);
+  ]]);
 
   let sceneOutput = "";
+  const timer = setTimeout(() => {
+    sceneCmd.kill("SIGTERM");
+  }, SCENE_TIMEOUT_MS);
   sceneCmd.stderr.on("data", (d) => { sceneOutput += d; });
 
   await new Promise<void>((resolve, reject) => {
     sceneCmd.on("close", (code) => {
+      clearTimeout(timer);
       if (code !== 0) reject(new Error(`Scene detection failed: ${sceneOutput.slice(-500)}`));
       else resolve();
     });
@@ -300,19 +306,26 @@ async function cutClip(
   start: number,
   end: number
 ): Promise<void> {
+  const CUT_TIMEOUT_MS = 120_000; // 2 minutes
+
   return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", [
+    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
       "-ss", start.toFixed(3),
       "-to", end.toFixed(3),
       "-i", sourcePath,
       "-c", "copy",
       "-y",
       outputPath,
-    ]);
+    ]]);
 
     let stderr = "";
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      reject(new Error(`ffmpeg cut timed out after ${CUT_TIMEOUT_MS}ms`));
+    }, CUT_TIMEOUT_MS);
     proc.stderr.on("data", (d) => { stderr += d; });
     proc.on("close", (code) => {
+      clearTimeout(timer);
       if (code !== 0) {
         reject(new Error(`ffmpeg cut failed: ${stderr.slice(-500)}`));
       } else {
