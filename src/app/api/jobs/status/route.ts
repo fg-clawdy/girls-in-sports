@@ -38,7 +38,6 @@ export async function GET() {
         createdAt: true,
       },
     });
-
     const campaigns = await prisma.campaign.findMany({
       orderBy: { createdAt: "desc" },
       select: {

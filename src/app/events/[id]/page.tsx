@@ -345,19 +345,18 @@ export default function EventPage() {
     setUploadFileCount(files.length);
     const fileList = Array.from(files);
     try {
-      await Promise.all(
-        fileList.map(
-          (file) =>
-            new Promise<void>((resolve, reject) => {
-              const xhr = new XMLHttpRequest();
-              const formData = new FormData();
-              formData.append("files", file);
-              xhr.upload.addEventListener("progress", (e) => {
-                if (e.lengthComputable) {
-                  const pct = Math.round((e.loaded / e.total) * 100);
-                  setUploadProgress((prev) => ({ ...prev, [file.name]: pct }));
-                }
-              });
+      // Upload sequentially to avoid concurrent memory pressure
+      for (const file of fileList) {
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          const formData = new FormData();
+          formData.append("files", file);
+          xhr.upload.addEventListener("progress", (e) => {
+            if (e.lengthComputable) {
+              const pct = Math.round((e.loaded / e.total) * 100);
+              setUploadProgress((prev) => ({ ...prev, [file.name]: pct }));
+            }
+          });
               xhr.addEventListener("load", () => {
                 setUploadProgress((prev) => ({ ...prev, [file.name]: 100 }));
                 if (xhr.status >= 200 && xhr.status < 300) {
@@ -370,9 +369,8 @@ export default function EventPage() {
               xhr.addEventListener("abort", () => reject(new Error(`${file.name}: Aborted`)));
               xhr.open("POST", `/api/events/${eventId}/upload`);
               xhr.send(formData);
-            })
-        )
-      );
+            });
+      }
       setShowUploadToast(true);
       await fetchEventData();
       await fetchClips();
