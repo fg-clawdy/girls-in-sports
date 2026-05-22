@@ -56,3 +56,5 @@ next-env.d.ts
 # Exception: PWA icons must be committed
 !/public/icon-192.png
 !/public/icon-512.png
+
+skills/
