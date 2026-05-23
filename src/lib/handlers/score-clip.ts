@@ -5,6 +5,8 @@ import { join } from "path";
 import { prisma } from "../prisma";
 import { downloadAssetToFile, updateAssetDescription } from "../immich";
 import { computeTieredScore, TIER_FORMULAS } from "../tier-formulas";
+import { checkAndReserveBudget, isEventCircuitPaused, recordJobOutcome, refundBudget, estimateScoreClipCost } from "../cost-estimator";
+import { createLogger } from "../logger";
 
 interface ScoreClipPayload {
   assetId: string;
@@ -32,24 +34,69 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
   const pl = args.payload as ScoreClipPayload;
   const { assetId, immichAssetId, eventId } = pl;
 
+  // Quality tracking for partial failures (US-014)
+  let visionFailedBatches = 0;
+  let visionUsedFallback = false;
+
   const tmpDir = join(TMP_BASE, assetId);
   await fs.mkdir(tmpDir, { recursive: true });
   const sourcePath = join(tmpDir, "source");
 
   try {
     // ── 1. Download clip from Immich ──
-    await downloadAssetToFile(immichAssetId, sourcePath);
     const asset = await prisma.asset.findUnique({
       where: { id: assetId },
       include: { event: true },
     });
     if (!asset) throw new Error(`Asset ${assetId} not found`);
 
-    const duration = asset.durationSeconds || 0;
+    let parentAsset: any = null;
+    if (asset.parentAssetId) {
+      parentAsset = await prisma.asset.findUnique({ where: { id: asset.parentAssetId } });
+    }
+
+    let analysisImmich = immichAssetId;
+    let analysisPath = sourcePath;
+    let needsWindow = false;
+    let winStart = 0;
+    let winEnd = asset.durationSeconds || 0;
+    if (asset.parentAssetId && asset.startTimeMs != null && asset.endTimeMs != null && parentAsset && asset.immichAssetId === parentAsset.immichAssetId) {
+      analysisImmich = parentAsset.immichAssetId;
+      needsWindow = true;
+      winStart = (asset.startTimeMs || 0) / 1000;
+      winEnd = (asset.endTimeMs || 0) / 1000;
+    }
+
+    if (needsWindow) {
+      const parentSrc = join(tmpDir, "parent");
+      await downloadAssetToFile(analysisImmich, parentSrc);
+      const winPath = join(tmpDir, "window.mp4");
+      await cutWindow(parentSrc, winPath, winStart, winEnd);
+      analysisPath = winPath;
+      try { await fs.unlink(parentSrc); } catch {}
+    } else {
+      await downloadAssetToFile(analysisImmich, analysisPath);
+    }
+
+    if (isEventCircuitPaused(eventId)) {
+      await prisma.asset.update({ where: { id: assetId }, data: { status: "FAILED" } });
+      recordJobOutcome(eventId, false);
+      throw new Error("Circuit breaker active");
+    }
+    const est = estimateScoreClipCost(true, true, asset.durationSeconds || 30);
+    const bchk = await checkAndReserveBudget(eventId, est.estimatedDIEM);
+    if (!bchk.allowed) {
+      await prisma.asset.update({ where: { id: assetId }, data: { status: "FAILED" } });
+      recordJobOutcome(eventId, false);
+      await refundBudget(eventId, est.estimatedDIEM);
+      throw new Error(bchk.reason || "budget");
+    }
+
+    const analysisDuration = needsWindow ? Math.max(0.1, winEnd - winStart) : (asset.durationSeconds || 0);
     const sport = asset.event?.sport?.toLowerCase() || "default";
 
-    // ── 2. Run STT on raw video ──
-    const sttResult = await transcribeVideo(sourcePath);
+    // ── 2. Run STT on raw video (windowed for legacy child scenes) ──
+    const sttResult = await transcribeVideo(analysisPath);
     const { transcript, segments: sttSegments } = sttResult;
 
     // ── 3. Compute audio/keyword score ──
@@ -61,24 +108,24 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     );
 
     // ── 4. Compute motion score EARLY (for clipType + dynamic frame strategy — proposal B) ──
-    const motionScore = await computeMotionScore(sourcePath);
+    const motionScore = await computeMotionScore(analysisPath);
 
     // ── 5. Early clipType (used for type-driven frame extraction) ──
     let clipType = assignClipType(motionScore, audioScore);
 
-    // ── 6. Dynamic frame count based on clipType + duration (ACTION gets scene+midpoints, SPEECH gets 2-3 even) ──
+    // ── 6. Dynamic frame count based on clipType + analysisDuration (ACTION gets scene+midpoints, SPEECH gets 2-3 even) ──
     let frameCount = 3;
     if (clipType === ClipType.ACTION || clipType === ClipType.MIXED) {
-      frameCount = duration <= 10 ? 6 : 12;
+      frameCount = analysisDuration <= 10 ? 6 : 12;
     } else if (clipType === ClipType.SPEECH) {
       frameCount = 3;
     } else {
-      frameCount = duration <= 10 ? 3 : duration <= 30 ? 6 : 12;
+      frameCount = analysisDuration <= 10 ? 3 : analysisDuration <= 30 ? 6 : 12;
     }
 
     const framesDir = join(tmpDir, "frames");
     await fs.mkdir(framesDir, { recursive: true });
-    const framePaths = await extractKeyframes(sourcePath, framesDir, frameCount, duration);
+    const framePaths = await extractKeyframes(analysisPath, framesDir, frameCount, analysisDuration);
 
     // ── 7. Vision analysis on keyframes — ONLY momentScore + productionScore (proposal A) ──
     let momentScore = 0;
@@ -89,6 +136,8 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       const visionResults = await analyzeKeyframesWithVision(framePaths, sport);
       momentScore = visionResults.momentScore;
       productionScore = visionResults.productionScore;
+      visionFailedBatches = visionResults.visionFailedBatches;
+      visionUsedFallback = visionResults.visionUsedFallback;
     }
 
     // ── 8. Tiered compositeScore using event.qualityTier + transparent TIER_FORMULAS (proposal C + D) ──
@@ -138,6 +187,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       where: { id: assetId },
       data: { status: AssetStatus.SCORED },
     });
+    recordJobOutcome(eventId, true);
 
     // ── 11. Write tags to Immich and AssetTag table ──
     const eventSport = asset.event?.sport || "sports";
@@ -205,6 +255,18 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         });
       }
     }
+
+    // ── 14. Record structured quality flags on the Job (US-014) ──
+    await prisma.job.update({
+      where: { id: args.jobId },
+      data: {
+        qualityFlags: {
+          visionFailedBatches,
+          visionUsedFallback,
+          sttFailed: false, // extend later if needed
+        } as any,
+      },
+    });
   } finally {
     // ── 14. Clean up temp files ──
     try {
@@ -474,12 +536,14 @@ async function extractKeyframes(
   return paths;
 }
 
-async function analyzeKeyframesWithVision(
+export async function analyzeKeyframesWithVision(
   framePaths: string[],
   sport: string
 ): Promise<{
   momentScore: number;
   productionScore: number;
+  visionFailedBatches: number;
+  visionUsedFallback: boolean;
 }> {
   const SYSTEM_PROMPT = `You are a sports media evaluator for Girls In Sports.
 Analyze the provided keyframes from a youth sports video clip.
@@ -493,6 +557,8 @@ Return ONLY the JSON object, no markdown, no explanations.`;
   const batchSize = 3;
   const momentScores: number[] = [];
   const productionScores: number[] = [];
+  let visionFailedBatches = 0;
+  let visionUsedFallback = false;
 
   for (let i = 0; i < framePaths.length; i += batchSize) {
     const batch = framePaths.slice(i, i + batchSize);
@@ -526,7 +592,10 @@ Return ONLY the JSON object, no markdown, no explanations.`;
     });
 
     if (!res.ok) {
-      console.warn(`Vision API error for batch ${i / batchSize}: ${res.status}`);
+      visionFailedBatches++;
+      visionUsedFallback = true;
+      const log = createLogger({ stage: "SCORE_CLIP_VISION" });
+      log.warn({ batch: i / batchSize, status: res.status }, "Vision API error — using fallback scores");
       continue;
     }
 
@@ -540,8 +609,9 @@ Return ONLY the JSON object, no markdown, no explanations.`;
       momentScores.push(Math.min(100, Math.max(0, Number(parsed.momentScore) || 50)));
       productionScores.push(Math.min(100, Math.max(0, Number(parsed.productionScore) || 40)));
     } catch (e) {
-      console.warn("Failed to parse vision response:", raw.slice(0, 200));
-      // Fallback: use a safe spread
+      const log = createLogger({ stage: "SCORE_CLIP_VISION" });
+      log.warn({ rawPreview: raw.slice(0, 200) }, "Failed to parse vision response — degraded quality");
+      visionUsedFallback = true;
       momentScores.push(50);
       productionScores.push(40);
     }
@@ -555,6 +625,8 @@ Return ONLY the JSON object, no markdown, no explanations.`;
   return {
     momentScore: Math.round(avgMoment),
     productionScore: Math.round(avgProduction),
+    visionFailedBatches,
+    visionUsedFallback,
   };
 }
 
@@ -605,4 +677,38 @@ function assignClipType(motionScore: number, audioScore: number): ClipType {
   if (audioScore > 60 && motionScore < 40) return ClipType.SPEECH;
   if (motionScore > 60 && audioScore > 40) return ClipType.MIXED;
   return ClipType.MONTAGE;
+}
+
+// ── Cut a temporal window from a source (for legacy child CLIP scene re-scoring) ──
+async function cutWindow(
+  sourcePath: string,
+  outputPath: string,
+  start: number,
+  end: number
+): Promise<void> {
+  const CUT_TIMEOUT_MS = 120_000;
+  return new Promise((resolve, reject) => {
+    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
+      "-ss", start.toFixed(3),
+      "-to", end.toFixed(3),
+      "-i", sourcePath,
+      "-c", "copy",
+      "-y",
+      outputPath,
+    ]]);
+    let stderr = "";
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      reject(new Error(`ffmpeg window cut timed out after ${CUT_TIMEOUT_MS}ms`));
+    }, CUT_TIMEOUT_MS);
+    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`ffmpeg window cut failed: ${stderr.slice(-500)}`));
+      } else {
+        resolve();
+      }
+    });
+  });
 }
