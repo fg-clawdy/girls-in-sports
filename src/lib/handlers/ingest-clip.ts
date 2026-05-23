@@ -1,3 +1,6 @@
+// US-014: centralized quality flag + error recording for every external call failure
+// (Immich, ffmpeg/ffprobe, scene detection, uploads). Matches the pattern now used
+// in score-clip and required by the JobHandler contract.
 import { PrismaClient, AssetStatus } from "@prisma/client";
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
@@ -8,6 +11,7 @@ import {
   uploadAssetFromFile,
   addAssetsToAlbum,
 } from "../immich";
+import { recordQualityFlags, recordJobError, markPartialSuccess } from "./quality-tracking";
 
 interface IngestClipPayload {
   assetId: string;
@@ -22,8 +26,13 @@ const SCENE_THRESHOLD = 0.3;
 const MIN_SCENE_DURATION = 3;
 const MAX_SCENE_DURATION = 120;
 
-export async function handleIngestClip(payload: unknown): Promise<void> {
-  const pl = payload as IngestClipPayload;
+// US-014: signature updated to receive jobId (worker now passes it for every handler).
+// All external calls (Immich, ffprobe, ffmpeg scene/cut) are now wrapped so that
+// failures are recorded to Job.error + qualityFlags, circuit breakers trigger,
+// and users see actionable messages instead of silent failures.
+export async function handleIngestClip(args: { payload: unknown; jobId: string }): Promise<void> {
+  const pl = args.payload as IngestClipPayload;
+  const jobId = args.jobId;
   const { assetId, immichAssetId, eventId } = pl;
 
   // ── 1. Create temp directory ──
@@ -162,6 +171,15 @@ export async function handleIngestClip(payload: unknown): Promise<void> {
         },
       });
     }
+
+    // US-014 success path: record that ingest completed (even if some child clips had issues downstream)
+    await recordQualityFlags(jobId, "ingest-clip", { failed: false });
+  } catch (err) {
+    // US-014: every failure path now records exact error + quality flag so the
+    // user sees a clear message, the circuit breaker can trip, and the worker
+    // can decide retry vs. permanent FAILED.
+    await recordJobError(jobId, err as Error, "ingest-clip");
+    throw err;
   } finally {
     // ── 7. Clean up temp files ──
     try {

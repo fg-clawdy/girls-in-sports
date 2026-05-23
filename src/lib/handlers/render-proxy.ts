@@ -3,8 +3,11 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import { prisma } from "../prisma";
 import { downloadAssetToFile, uploadAssetFromFile, addAssetsToAlbum } from "../immich";
+// US-014: centralized quality flag + error recording for render-proxy failures
+// (ffmpeg timeouts, Immich upload failures, script validation, etc.)
 import { resolveSceneCut } from "../resolve-scene-cut";
 import { getBeatAlignedDuration } from "../beat-sync-service";
+import { recordQualityFlags, recordJobError } from "./quality-tracking";
 
 const PROXY_OUTPUT_DIR = "/tmp/gis-proxies";
 const SAFETY_MARGIN_MS = 200;
@@ -256,6 +259,14 @@ export async function handleRenderProxy({
     });
 
     console.log(`[render-proxy] Proxy ready for campaign ${campaignId}: ${proxyAsset.id}`);
+
+// US-014: record success so quality dashboard and circuit breaker see a clean run
+    await recordQualityFlags(jobId, "render-proxy", { failed: false });
+  } catch (err) {
+    // US-014: record the render failure (ffmpeg, Immich, validation, etc.)
+    // so Job.error, quality flags, and the circuit breaker all see the exact cause.
+    await recordJobError(jobId, err as Error, "render-proxy");
+    throw err; // re-throw so the worker marks the Job FAILED and triggers circuit logic
   } finally {
     // Cleanup work dir
     try {

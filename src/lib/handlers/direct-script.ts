@@ -1,8 +1,11 @@
+// US-014: centralized quality flag + error recording for LLM/Venice failures
+// (matches the hardened pattern in score-clip and ingest-clip).
 import { prisma } from "../prisma";
 import { JobType } from "@prisma/client";
 import { enqueueJob } from "../job-worker";
 import { isEventCircuitPaused, recordJobOutcome, refundBudget } from "../cost-estimator";
 import { createLogger } from "../logger";
+import { recordQualityFlags, recordJobError } from "./quality-tracking";
 
 const VENICE_URL = process.env.VENICE_API_URL || "https://api.venice.ai/api/v1";
 const VENICE_KEY = process.env.VENICE_API_KEY || "";
@@ -169,6 +172,8 @@ export async function handleDirectScript({
         }),
       ]);
 
+// US-014: record success so quality dashboard and circuit breaker see a clean run
+      await recordQualityFlags(jobId, "direct-script", { failed: false });
       log.info("Campaign scripted successfully");
       return;
     } catch (err) {
@@ -182,6 +187,10 @@ export async function handleDirectScript({
           data: { status: "FAILED" },
         });
         await refundBudget(eventId, 0.02);
+
+        // US-014: record the final error so the Job table, circuit breaker, and
+        // user-facing quality summary all see exactly what went wrong.
+        await recordJobError(jobId, err as Error, "direct-script");
         throw new Error(`DIRECT_SCRIPT failed after ${MAX_RETRIES + 1} attempts: ${msg}`);
       }
     }

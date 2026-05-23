@@ -1,3 +1,5 @@
+// US-014: centralized quality flag + error recording for music generation failures
+// (ElevenLabs / ACE-Step timeouts, model unavailability). Matches hardened pattern.
 import { prisma } from "../prisma";
 import {
   queueMusicGeneration,
@@ -5,6 +7,7 @@ import {
 } from "../music-generation";
 import { isEventCircuitPaused, recordJobOutcome, checkAndReserveBudget, refundBudget, estimateMusicGenCost } from "../cost-estimator";
 import { analyzeBeats } from "../beat-sync-service";
+import { recordQualityFlags, recordJobError } from "./quality-tracking";
 
 const MAX_POLL_ATTEMPTS = 120; // 5s * 120 = 600s = 10 minutes
 const POLL_INTERVAL_MS = 5000;
@@ -91,7 +94,9 @@ export async function handleGenerateMusic({
     } catch (err2) {
       console.error(`[generate-music] Both music models failed:`, err2);
       await markMusicFailed(campaignId, "Music generation failed — both models unavailable");
-      return; // Non-fatal: campaign is not blocked
+      // US-014: record the error even though this stage is non-fatal (render continues without music)
+      await recordJobError(jobId, err2 as Error, "generate-music");
+      return;
     }
   }
 
@@ -118,6 +123,8 @@ export async function handleGenerateMusic({
   if (!completed || !filePath) {
     console.error(`[generate-music] Timed out after ${MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 1000}s`);
     await markMusicFailed(campaignId, "Music generation timed out — render will continue without music");
+    // US-014: record timeout (non-fatal for render, but visible in quality dashboard + Job.error)
+    await recordJobError(jobId, new Error("Music generation timed out"), "generate-music");
     return;
   }
 
@@ -149,6 +156,9 @@ export async function handleGenerateMusic({
   }
 
   recordJobOutcome(eventId, true);
+
+// US-014: record success so quality dashboard and circuit breaker see a clean run
+  await recordQualityFlags(jobId, "generate-music", { failed: false });
 
   console.log(`[generate-music] Music ready at ${filePath} for campaign ${campaignId}`);
 }

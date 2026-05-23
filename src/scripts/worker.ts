@@ -18,9 +18,11 @@ const HEALTH_PORT = parseInt(process.env.WORKER_HEALTH_PORT || "3011", 10);
 // Lazy-load handlers after dotenv has initialized env vars
 // This avoids ESM import hoisting evaluating handler modules before config() runs
 
-registerHandler(JobType.INGEST_CLIP, async ({ payload }) => {
+// US-014: pass jobId so the ingest handler can record failures, quality flags,
+// and trigger circuit breakers exactly like score-clip and all render handlers.
+registerHandler(JobType.INGEST_CLIP, async ({ payload, jobId }) => {
   const { handleIngestClip } = await import("../lib/handlers/ingest-clip");
-  await handleIngestClip(payload);
+  await handleIngestClip({ payload, jobId });
 });
 
 registerHandler(JobType.SCORE_CLIP, async ({ payload, jobId }) => {

@@ -3,8 +3,11 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import { prisma } from "../prisma";
 import { downloadAssetToFile, uploadAssetFromFile, addAssetsToAlbum, updateAssetDescription } from "../immich";
+// US-014: centralized quality flag + error recording for render-final failures
+// (ffmpeg timeouts, Immich upload, quality scoring, etc.)
 import { getBeatAlignedDuration, snapToNearestBeat } from "../beat-sync-service";
 import { resolveSceneCut } from "../resolve-scene-cut";
+import { recordQualityFlags, recordJobError } from "./quality-tracking";
 
 const FINAL_OUTPUT_DIR = "/outputs";
 const SAFETY_MARGIN_MS = 150;
@@ -309,6 +312,14 @@ export async function handleRenderFinal({
     });
 
     console.log(`[render-final] Final render complete for campaign ${campaignId}: ${finalAsset.id}`);
+
+// US-014: record success so quality dashboard and circuit breaker see a clean run
+    await recordQualityFlags(jobId, "render-final", { failed: false });
+  } catch (err) {
+    // US-014: record the render failure (ffmpeg, Immich, validation, quality scoring, etc.)
+    // so Job.error, quality flags, and the circuit breaker all see the exact cause.
+    await recordJobError(jobId, err as Error, "render-final");
+    throw err; // re-throw so the worker marks the Job FAILED and triggers circuit logic
   } finally {
     // Cleanup work dir (keep outDir for download)
     try {

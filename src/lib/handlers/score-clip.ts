@@ -7,7 +7,9 @@ import { prisma } from "../prisma";
 import { downloadAssetToFile, updateAssetDescription } from "../immich";
 import { computeTieredScore, TIER_FORMULAS } from "../tier-formulas";
 import { checkAndReserveBudget, isEventCircuitPaused, recordJobOutcome, refundBudget, estimateScoreClipCost } from "../cost-estimator";
+// US-014: centralized quality flag + error recording (graceful degradation, circuit breaker, user-visible messages)
 import { createLogger } from "../logger";
+import { recordQualityFlags, markPartialSuccess, recordJobError } from "./quality-tracking";
 
 interface ScoreClipPayload {
   assetId: string;
@@ -276,17 +278,20 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       }
     }
 
-    // ── 14. Record structured quality flags on the Job (US-014) ──
-    await prisma.job.update({
-      where: { id: args.jobId },
-      data: {
-        qualityFlags: {
-          visionFailedBatches,
-          visionUsedFallback,
-          sttFailed: false, // extend later if needed
-        } as any,
-      },
+// ── 14. Record structured quality flags on the Job (US-014) ──
+    // Use centralized helper so failures, fallbacks, and vision batch stats are
+    // consistently stored, trigger circuit breakers, and become visible to users.
+// US-014: ensure every failure path records the error for user visibility,
+// circuit-breaker triggering, and auditability. Re-throw so the worker
+// can set final Job status (FAILED / retry / dead-letter).
+    await recordQualityFlags(args.jobId, "score-clip", {
+      visionFailedBatches,
+      visionUsedFallback,
+      sttFailed: false,
     });
+  } catch (err) {
+    await recordJobError(args.jobId, err as Error, "score-clip");
+    throw err;
   } finally {
     // ── 14. Clean up temp files ──
     try {

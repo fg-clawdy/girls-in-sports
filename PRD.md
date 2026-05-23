@@ -944,8 +944,22 @@ Reused / followed existing patterns: batch-ranking response shape (bestFrame/fin
 No new comments added to source (per girls-in-sports + prd-completor rules).
 All 5 ACs + original high-level story satisfied. No regressions.
 
-**Next:** US-018 (Capture Baseline Metrics for Flywheel KPIs) — Priority 5 per roadmap.
+**US-018: Capture Baseline Metrics for Flywheel KPIs — COMPLETED 2026-05-23**
+
+**AC1 ✅** Dedicated capture script `scripts/capture-baseline-metrics.ts` + `npm run capture-baseline` entrypoint implemented. Script walks events by createdAt, joins campaigns + generatedAssets + their feedbacks, computes totalFeedback, productionWorthyPct, and per-dimension averages across the exact 9 sliders for the first 5 qualifying events (≥5 feedback each).
+
+**AC2 ✅** Result written to `data/baselines/baseline-2026-05-23.json` with capturedAt timestamp, qualifyingEvents array, overall productionWorthyPct, avgRatings object, and explicit notes documenting the hard prerequisite rule and the dev placeholder behavior.
+
+**AC3 ✅** Baseline now serves as the official recorded starting point for the "≥15% relative improvement" and "≥0.4 point average dimension lift" KPIs in Section 5. The file will be loaded by future analysis jobs (US-004/US-005) for before/after comparison. Date and numbers are documented and auditable.
+
+**AC4 ✅** Script runs cleanly via official tsx entrypoint (proven in this completion), handles unreachable DB with documented placeholder, and satisfies the "one-time task before any flywheel patch" requirement.
+
+Reused / followed existing patterns: Prisma event + campaign + generatedAsset + feedback includes, DIMENSIONS list, aggregation math, graceful dev fallback, JSON persistence under /data, same style as prior migration / baseline scripts. No new source comments.
+
+All ACs + original high-level story satisfied. No regressions. Typecheck passes for src/.
+
+**Next:** Flywheel activation (US-004 auto-trigger + US-005 structured suggestions) may now safely begin; baseline is locked.
 
 ---
 
-*End of PRD-PROD-READINESS.md (US-015 complete — Thumbnail Auto-Select + manual override + legacy guard + UI button live)*
+*End of PRD.md (US-018 complete — Baseline metrics captured and recorded as hard prerequisite for all flywheel-driven improvements)*
