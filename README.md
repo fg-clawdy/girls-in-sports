@@ -40,3 +40,9 @@ See `.env.example` for all required variables.
 ## License
 
 MIT
+
+## Deprecated / Removed (US-017, 2026-05-23)
+
+- `src/lib/quality-gate-service.ts` and `src/lib/pre-filter-service.ts` (plus related admin route and PreFilterScore model) were removed.
+- They had no usage in the main ingest/score/compose/render pipeline (only experimental local-only paths).
+- See PRD.md US-017 log for audit + rationale. Pre-filter concept may be revisited later.

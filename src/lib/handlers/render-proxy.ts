@@ -3,6 +3,8 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import { prisma } from "../prisma";
 import { downloadAssetToFile, uploadAssetFromFile, addAssetsToAlbum } from "../immich";
+import { resolveSceneCut } from "../resolve-scene-cut";
+import { getBeatAlignedDuration } from "../beat-sync-service";
 
 const PROXY_OUTPUT_DIR = "/tmp/gis-proxies";
 const SAFETY_MARGIN_MS = 200;
@@ -27,7 +29,7 @@ export async function handleRenderProxy({
     include: {
       event: true,
       campaignClips: {
-        include: { asset: true },
+        include: { asset: { include: { parentAsset: true } } },
         orderBy: { order: "asc" },
       },
     },
@@ -55,7 +57,7 @@ export async function handleRenderProxy({
   await fs.mkdir(workDir, { recursive: true });
 
   try {
-    // ── 1. Download and cut each segment ──
+    // ── 1. Download and cut each segment (scene-aware for child CLIP assets) ──
     const segmentFiles: string[] = [];
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
@@ -67,22 +69,64 @@ export async function handleRenderProxy({
         throw new Error(`Asset ${asset.id} has no immichAssetId`);
       }
 
-      const maxMs = Math.round((asset.durationSeconds || 0) * 1000);
-      const startMs = Math.max(0, clip.startTimeMs);
-      const endMs = maxMs > 0
-        ? Math.min(clip.endTimeMs, maxMs - SAFETY_MARGIN_MS)
-        : clip.endTimeMs;
+      // Resolve correct source (parent for legacy virtual scenes) + absolute cut times
+      const parentRef = asset.parentAsset
+        ? { id: asset.parentAsset.id, immichAssetId: asset.parentAsset.immichAssetId! }
+        : null;
+      const resolved = resolveSceneCut({
+        asset: {
+          id: asset.id,
+          parentAssetId: asset.parentAssetId,
+          immichAssetId: asset.immichAssetId,
+          startTimeMs: asset.startTimeMs,
+          endTimeMs: asset.endTimeMs,
+          durationSeconds: asset.durationSeconds,
+        },
+        parentAsset: parentRef,
+        scriptStartMs: clip.startTimeMs,
+        scriptEndMs: clip.endTimeMs,
+      });
 
-      if (startMs >= endMs) {
-        console.warn(`[render-proxy] Clip ${clip.assetId} has invalid timestamps ${startMs}-${endMs}, skipping`);
+      const sourceImmichId = resolved.downloadImmichId;
+      let cutStartMs = resolved.cutStartMs;
+      let cutEndMs = resolved.cutEndMs;
+
+      const sourceDurMs = asset.parentAsset?.durationSeconds
+        ? Math.round(asset.parentAsset.durationSeconds * 1000)
+        : Math.round((asset.durationSeconds || 0) * 1000);
+
+      cutStartMs = Math.max(0, cutStartMs);
+      cutEndMs = sourceDurMs > 0
+        ? Math.min(cutEndMs, sourceDurMs - SAFETY_MARGIN_MS)
+        : cutEndMs;
+
+      // US-012: beat-sync adjustment (proxy parity with final)
+      const beatDataProxy = (campaign as any).beatTimestampsJson as any;
+      const beatsProxy: number[] = Array.isArray(beatDataProxy?.beatTimestamps) ? beatDataProxy.beatTimestamps : [];
+      if (beatsProxy.length > 0) {
+        const intendedDurSProxy = (cutEndMs - cutStartMs) / 1000;
+        const maxDurSProxy = sourceDurMs > 0
+          ? Math.min(intendedDurSProxy * 1.3, (sourceDurMs - SAFETY_MARGIN_MS - cutStartMs) / 1000)
+          : intendedDurSProxy * 1.3;
+        if (maxDurSProxy > 0.1) {
+          const alignedDurSProxy = getBeatAlignedDuration(intendedDurSProxy, beatsProxy, maxDurSProxy);
+          const newEndMsProxy = cutStartMs + Math.round(alignedDurSProxy * 1000);
+          if (newEndMsProxy > cutStartMs + 100) {
+            cutEndMs = Math.min(cutEndMs, newEndMsProxy);
+          }
+        }
+      }
+
+      if (cutStartMs >= cutEndMs) {
+        console.warn(`[render-proxy] Clip ${clip.assetId} has invalid timestamps ${cutStartMs}-${cutEndMs}, skipping`);
         continue;
       }
 
       const sourcePath = path.join(workDir, `src_${i}_${asset.id}.mp4`);
-      await downloadAssetToFile(asset.immichAssetId, sourcePath);
+      await downloadAssetToFile(sourceImmichId, sourcePath);
 
       const segPath = path.join(workDir, `seg_${i}.mp4`);
-      await cutSegment(sourcePath, segPath, startMs / 1000, endMs / 1000);
+      await cutSegment(sourcePath, segPath, cutStartMs / 1000, cutEndMs / 1000);
 
       // ── Label this segment with clip number before concat ──
       const labeledPath = path.join(workDir, `seg_${i}_labeled.mp4`);

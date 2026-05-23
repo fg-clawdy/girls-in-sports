@@ -9,15 +9,18 @@ jest.mock("../src/lib/prisma", () => ({
     asset: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      findMany: jest.fn(),
     },
     clipScore: {
       upsert: jest.fn().mockResolvedValue({}),
     },
     event: {
       findUnique: jest.fn(),
+      update: jest.fn().mockResolvedValue({}),
     },
     assetTag: {
       upsert: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn(),
     },
     job: {
       update: jest.fn().mockResolvedValue({}),
@@ -72,6 +75,14 @@ describe("US-009: scene-aware scoring for child CLIP assets (legacy + real)", ()
         durationSeconds: 120,
       });
 
+    // US-015 AC5: exercise legacy USER_MANUAL thumbnail guard + auto best-composite selection in handleScoreClip
+    mockPrisma.assetTag.findFirst.mockResolvedValueOnce(null); // no manual lock → proceeds to legacy auto thumbnail
+    mockPrisma.asset.findMany.mockResolvedValueOnce([{
+      id: "child123",
+      immichAssetId: "immich-xyz",
+      clipScore: { compositeScore: 82 }
+    }]);
+
     // The handler will call download + cutWindow internally.
     // We only assert it does not throw and reaches the ClipScore upsert.
     await expect(
@@ -79,6 +90,8 @@ describe("US-009: scene-aware scoring for child CLIP assets (legacy + real)", ()
     ).resolves.not.toThrow();
 
     expect(mockPrisma.clipScore.upsert).toHaveBeenCalled();
+    expect(mockPrisma.assetTag.findFirst).toHaveBeenCalled(); // legacy USER_MANUAL "thumbnail" guard evaluated
+    expect(mockPrisma.asset.findMany).toHaveBeenCalled(); // best composite selection for auto thumbnail (when no manual lock)
   });
 
   test("real child CLIP (own immichAssetId) uses direct download path", async () => {

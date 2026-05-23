@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { processUnscenedVideosForEvent } from "@/lib/scene-detection-service";
+import { requireAdmin } from "@/lib/auth";
 
 /**
  * POST /api/admin/retroactive-scenes
@@ -20,7 +21,10 @@ import { processUnscenedVideosForEvent } from "@/lib/scene-detection-service";
  *     details: [{ eventId, eventName, processed, failed }, ...]
  *   }
  */
-export async function POST() {
+export async function POST(request: Request) {
+  const adminCheck = await requireAdmin(request);
+  if (adminCheck instanceof NextResponse) return adminCheck;
+
   try {
     // Fetch all events that have an Immich album
     const events = await prisma.event.findMany({

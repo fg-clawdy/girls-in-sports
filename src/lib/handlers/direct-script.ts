@@ -1,6 +1,8 @@
 import { prisma } from "../prisma";
 import { JobType } from "@prisma/client";
 import { enqueueJob } from "../job-worker";
+import { isEventCircuitPaused, recordJobOutcome, refundBudget } from "../cost-estimator";
+import { createLogger } from "../logger";
 
 const VENICE_URL = process.env.VENICE_API_URL || "https://api.venice.ai/api/v1";
 const VENICE_KEY = process.env.VENICE_API_KEY || "";
@@ -52,7 +54,8 @@ export async function handleDirectScript({
   const { campaignId, eventId, selectedAssetIds, mustIncludeAssetIds, adjustmentNotes } =
     payload as DirectorPayload;
 
-  console.log(`[direct-script] Starting job ${jobId} for campaign ${campaignId}`);
+  const log = createLogger({ jobId, campaignId, stage: "DIRECT_SCRIPT", eventId });
+  log.info("Starting direct script job");
 
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
@@ -68,18 +71,30 @@ export async function handleDirectScript({
   const targetMs = TARGET_DURATION_MS[campaign.targetFormat];
   if (!targetMs) throw new Error(`Unknown target format: ${campaign.targetFormat}`);
 
+  if (isEventCircuitPaused(eventId)) {
+    await prisma.campaign.update({ where: { id: campaignId }, data: { status: "FAILED" } });
+    throw new Error("Circuit breaker: repeated failures on this event");
+  }
+
   const acceptedClips = campaign.campaignClips
     .filter((cc) => cc.accepted && cc.asset)
-    .map((cc) => ({
-      assetId: cc.assetId,
-      immichAssetId: cc.asset.immichAssetId,
-      compositeScore: cc.asset.clipScore?.compositeScore ?? 0,
-      clipType: cc.asset.clipScore?.clipType ?? "MONTAGE",
-      durationSeconds: cc.asset.durationSeconds ?? 0,
-      transcriptExcerpt: cc.asset.clipScore?.transcriptExcerpt ?? null,
-      tags: cc.asset.assetTags.map((t) => t.tag),
-      mustInclude: cc.mustInclude,
-    }));
+    .map((cc) => {
+      const winStart = cc.startTimeMs ?? null;
+      const winEnd = cc.endTimeMs ?? null;
+      return {
+        assetId: cc.assetId,
+        immichAssetId: cc.asset.immichAssetId,
+        compositeScore: cc.asset.clipScore?.compositeScore ?? 0,
+        clipType: cc.asset.clipScore?.clipType ?? "MONTAGE",
+        durationSeconds: cc.asset.durationSeconds ?? 0,
+        transcriptExcerpt: cc.asset.clipScore?.transcriptExcerpt ?? null,
+        tags: cc.asset.assetTags.map((t) => t.tag),
+        mustInclude: cc.mustInclude,
+        windowStartMs: winStart,
+        windowEndMs: winEnd,
+        isChildScene: !!cc.asset.parentAssetId,
+      };
+    });
 
   // Retry loop
   let lastError = "";
@@ -94,6 +109,7 @@ export async function handleDirectScript({
         attempt > 0 ? lastError : undefined,
         adjustmentNotes
       );
+      recordJobOutcome(eventId, true);
 
       // Validate must-includes present
       const scriptAssetIds = new Set(script.clips.map((c) => c.assetId));
@@ -153,17 +169,19 @@ export async function handleDirectScript({
         }),
       ]);
 
-      console.log(`[direct-script] Campaign ${campaignId} scripted successfully`);
+      log.info("Campaign scripted successfully");
       return;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       lastError = msg;
-      console.error(`[direct-script] Attempt ${attempt + 1} failed: ${msg}`);
+      log.error({ attempt: attempt + 1, error: msg }, "Attempt failed — will retry or fail");
       if (attempt === MAX_RETRIES) {
+        recordJobOutcome(eventId, false);
         await prisma.campaign.update({
           where: { id: campaignId },
           data: { status: "FAILED" },
         });
+        await refundBudget(eventId, 0.02);
         throw new Error(`DIRECT_SCRIPT failed after ${MAX_RETRIES + 1} attempts: ${msg}`);
       }
     }
@@ -329,6 +347,5 @@ Generate the ProductionScript JSON now.`;
   // Ensure totalDurationMs is consistent
   const computedTotal = parsed.clips.reduce((sum, c) => sum + c.durationMs, 0);
   parsed.totalDurationMs = computedTotal;
-
   return parsed;
 }

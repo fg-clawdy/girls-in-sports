@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { enqueueJob, JobType } from "@/lib/job-worker";
+import { getEnv } from "@/lib/env";
 
 // POST /api/feedback/composition
 // Save a CompositionFeedback record
@@ -48,6 +50,27 @@ export async function POST(request: Request) {
         costDIEM: costDIEM || null,
       },
     });
+
+    // US-004 auto-trigger
+    try {
+      const threshold = getEnv().FEEDBACK_ANALYSIS_THRESHOLD;
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const recentCount = await prisma.compositionFeedback.count({
+        where: { createdAt: { gte: since } },
+      });
+      if (recentCount >= threshold) {
+        const lastReport = await prisma.feedbackAnalysisReport.findFirst({
+          orderBy: { generatedAt: "desc" },
+          select: { generatedAt: true },
+        });
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+        if (!lastReport || lastReport.generatedAt < oneHourAgo) {
+          await enqueueJob(JobType.FEEDBACK_ANALYSIS, { trigger: "composition-feedback", count: recentCount });
+        }
+      }
+    } catch (e) {
+      // non-fatal
+    }
 
     return NextResponse.json({ success: true, feedback });
   } catch (error) {

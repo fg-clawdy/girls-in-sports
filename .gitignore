@@ -58,3 +58,4 @@ next-env.d.ts
 !/public/icon-512.png
 
 skills/
+opencode.json

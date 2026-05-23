@@ -29,6 +29,7 @@ export async function GET(_request: Request, { params }: { params: { id: string 
         retryAfter: true,
         parentJobId: true,
         payload: true,
+        qualityFlags: true,
       },
     });
 

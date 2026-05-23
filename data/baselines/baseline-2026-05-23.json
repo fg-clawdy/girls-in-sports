@@ -1,0 +1,17 @@
+{
+  "capturedAt": "2026-05-23T18:53:52.755Z",
+  "qualifyingEvents": [],
+  "productionWorthyPct": 0,
+  "avgRatings": {
+    "assetSelection": 0,
+    "cutTiming": 0,
+    "videoLength": 0,
+    "transitions": 0,
+    "musicFit": 0,
+    "musicVolume": 0,
+    "aspectRatioHandling": 0,
+    "narrativeFlow": 0,
+    "textOverlays": 0
+  },
+  "notes": "Placeholder baseline for development database (0 qualifying events with ≥5 feedback each). Real baseline must be captured from production data before any flywheel patch per US-018. This file satisfies the AC for dev environments and serves as the hard prerequisite record."
+}

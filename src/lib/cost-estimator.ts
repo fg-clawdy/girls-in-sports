@@ -1,17 +1,16 @@
-/**
- * Estimate DIEM cost for Venice.ai API operations.
- * Fallback since billing API is not accessible with inference keys.
- */
+import { prisma } from "./prisma";
+import { getEnv } from "./env";
 
-// Venice pricing approximations (DIEM per 1K tokens)
 const PRICING = {
   textInput: 0.0001,
   textOutput: 0.0003,
-  visionPerImage: 0.015, // per image/frame in vision batch
+  visionPerImage: 0.015,
+  sttPerMinute: 0.005,
+  musicGen: 0.10,
+  upscalePerClip: 0.08,
 };
 
 function estimateTokens(text: string): number {
-  // Rough estimate: ~1 token per 4 characters for English
   return Math.ceil(text.length / 4);
 }
 
@@ -75,4 +74,67 @@ export function estimateTotalPipelineCost(
  */
 export function shouldGenerateABVariant(costDIEM: number): boolean {
   return costDIEM < 1.0;
+}
+
+export function estimateDirectScriptCost(clipCount: number, hasIntent: boolean): CostEstimate {
+  const base = clipCount * 1200;
+  const intentExtra = hasIntent ? 800 : 0;
+  const tokens = base + intentExtra;
+  const inputCost = (tokens / 1000) * PRICING.textInput;
+  const outputCost = (tokens / 1500) * PRICING.textOutput;
+  return { textTokens: tokens, visionFrames: 0, estimatedDIEM: parseFloat((inputCost + outputCost).toFixed(6)) };
+}
+
+export function estimateScoreClipCost(hasVision: boolean, hasSTT: boolean, durationSec: number): CostEstimate {
+  let d = 0;
+  if (hasVision) d += 3 * PRICING.visionPerImage;
+  if (hasSTT) d += Math.max(0.001, (durationSec / 60) * PRICING.sttPerMinute);
+  return { textTokens: 0, visionFrames: hasVision ? 3 : 0, estimatedDIEM: parseFloat(d.toFixed(6)) };
+}
+
+export function estimateMusicGenCost(): CostEstimate {
+  return { textTokens: 0, visionFrames: 0, estimatedDIEM: PRICING.musicGen };
+}
+
+export function estimateUpscaleCost(): CostEstimate {
+  return { textTokens: 0, visionFrames: 0, estimatedDIEM: PRICING.upscalePerClip };
+}
+
+const circuitBreakers = new Map<string, { fails: number; pausedUntil: number }>();
+
+export function isEventCircuitPaused(eventId: string): boolean {
+  const b = circuitBreakers.get(eventId);
+  if (!b) return false;
+  if (Date.now() > b.pausedUntil) { circuitBreakers.delete(eventId); return false; }
+  return true;
+}
+
+export function recordJobOutcome(eventId: string, success: boolean): void {
+  const now = Date.now();
+  let b = circuitBreakers.get(eventId) || { fails: 0, pausedUntil: 0 };
+  if (success) {
+    b.fails = 0;
+    b.pausedUntil = 0;
+  } else {
+    b.fails++;
+    if (b.fails >= 3) b.pausedUntil = now + 10 * 60 * 1000;
+  }
+  circuitBreakers.set(eventId, b);
+}
+
+export async function checkAndReserveBudget(eventId: string, projectedUSD: number): Promise<{ allowed: boolean; effectiveBudget: number; current: number; reason?: string }> {
+  const env = getEnv();
+  const ev = await prisma.event.findUnique({ where: { id: eventId }, select: { costBudgetUSD: true, currentEstimatedCost: true } });
+  if (!ev) return { allowed: false, effectiveBudget: 0, current: 0, reason: "Event not found" };
+  const budget = ev.costBudgetUSD ?? env.DEFAULT_EVENT_BUDGET_USD;
+  const current = ev.currentEstimatedCost ?? 0;
+  if (current + projectedUSD > budget) {
+    return { allowed: false, effectiveBudget: budget, current, reason: `Projected ${projectedUSD.toFixed(2)} would exceed budget ${budget.toFixed(2)} (current ${current.toFixed(2)})` };
+  }
+  await prisma.event.update({ where: { id: eventId }, data: { currentEstimatedCost: { increment: projectedUSD } } });
+  return { allowed: true, effectiveBudget: budget, current: current + projectedUSD };
+}
+
+export async function refundBudget(eventId: string, amount: number): Promise<void> {
+  await prisma.event.update({ where: { id: eventId }, data: { currentEstimatedCost: { decrement: Math.max(0, amount) } } });
 }

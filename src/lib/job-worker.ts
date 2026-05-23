@@ -4,6 +4,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { sendPushNotification } from "./push";
+import { logger, createLogger } from "./logger";
 
 let _prisma: PrismaClient | null = null;
 
@@ -165,7 +166,7 @@ async function markDone(jobId: string, jobType: JobType, payload: unknown) {
     try {
       await sendPushNotification(null, { title, body, url });
     } catch (err) {
-      console.error("[worker] Push notification failed:", err);
+      logger.error({ stage: 'push', error: String(err) }, 'Push notification failed');
     }
   }
 }
@@ -198,34 +199,41 @@ async function markFailed(jobId: string, error: string, attempts: number, maxAtt
 // ── Main Loop ─────────────────────────────────────────────────
 
 let isShuttingDown = false;
+let jobsProcessed = 0;
+let jobsFailed = 0;
+const startTime = Date.now();
 
 export async function startWorker() {
-  console.log("[worker] Starting job worker...");
+  logger.info({ stage: 'worker' }, 'Starting job worker');
 
   while (!isShuttingDown) {
+    const start = Date.now();
     try {
       const job = await claimNextJob();
 
       if (job) {
-        console.log(`[worker] Claimed job ${job.id} (${job.type})`);
+        const log = createLogger({ jobId: job.id, jobType: job.type, stage: 'worker' });
+        log.info('Job claimed');
         try {
           await processJob(job);
           await markDone(job.id, job.type as JobType, job.payload);
-          console.log(`[worker] Job ${job.id} completed`);
+          jobsProcessed++;
+          log.info({ durationMs: Date.now() - start }, 'Job completed');
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
-          console.error(`[worker] Job ${job.id} failed: ${errorMsg}`);
+          jobsFailed++;
+          log.error({ error: errorMsg, durationMs: Date.now() - start }, 'Job failed');
           await markFailed(job.id, errorMsg, job.attempts, job.maxAttempts);
         }
       }
     } catch (err) {
-      console.error("[worker] Error in main loop:", err);
+      logger.error({ stage: 'worker', error: String(err) }, 'Main loop error');
     }
 
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
-  console.log("[worker] Shutting down...");
+  logger.info({ stage: 'worker' }, 'Shutting down');
   await getPrisma().$disconnect();
 }
 
@@ -248,8 +256,20 @@ export function startHealthServer(port = 3011) {
           where: { status: JobStatus.RUNNING },
         });
 
+        const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
+        const failureRate = jobsProcessed > 0 ? jobsFailed / jobsProcessed : 0;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", queueDepth, runningJobs }));
+        res.end(JSON.stringify({
+          status: "ok",
+          queueDepth,
+          runningJobs,
+          jobsProcessed,
+          jobsFailed,
+          failureRate: Number(failureRate.toFixed(4)),
+          uptimeSec,
+          version: "0.1.0",
+          worker: "running"
+        }));
       } catch (err) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "error", message: String(err) }));
@@ -261,7 +281,7 @@ export function startHealthServer(port = 3011) {
   });
 
   server.listen(port, () => {
-    console.log(`[worker] Health endpoint listening on port ${port}`);
+    logger.info({ stage: 'health', port }, 'Health endpoint listening');
   });
 
   return server;
@@ -271,12 +291,12 @@ export function startHealthServer(port = 3011) {
 
 export function setupGracefulShutdown() {
   process.on("SIGINT", () => {
-    console.log("\n[worker] SIGINT received");
+    logger.info({ stage: 'worker' }, 'SIGINT received');
     stopWorker();
   });
 
   process.on("SIGTERM", () => {
-    console.log("\n[worker] SIGTERM received");
+    logger.info({ stage: 'worker' }, 'SIGTERM received');
     stopWorker();
   });
 }

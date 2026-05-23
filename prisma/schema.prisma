@@ -20,6 +20,8 @@ model Event {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   qualityTier     QualityTier      @default(PROFESSIONAL)
+  costBudgetUSD       Float?
+  currentEstimatedCost Float? @default(0)
   assets          Asset[]
   campaigns       Campaign[]
   feedbackRatings FeedbackRating[]
@@ -35,27 +37,29 @@ model Asset {
   type            AssetType
   parentAssetId   String?
   filePath        String?
-  durationSeconds Float?
-  widthPx         Int?
-  heightPx        Int?
-  fps             Float?
-  codec           String?
-  sizeBytes       Int?
-  status          AssetStatus    @default(UPLOADED)
-  ingestJobId     String?
-  createdAt       DateTime       @default(now())
-  assetTags       AssetTag[]
-  event           Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  parentAsset     Asset?         @relation("AssetParent", fields: [parentAssetId], references: [id])
-  childAssets     Asset[]        @relation("AssetParent")
-  campaignClips   CampaignClip[]
-  clipScore       ClipScore?
+   durationSeconds Float?
+   startTimeMs     Int?
+   endTimeMs       Int?
+   widthPx         Int?
+   heightPx        Int?
+   fps             Float?
+   codec           String?
+   sizeBytes       Int?
+   status          AssetStatus    @default(UPLOADED)
+   ingestJobId     String?
+   createdAt       DateTime       @default(now())
+   assetTags       AssetTag[]
+   event           Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+   parentAsset     Asset?         @relation("AssetParent", fields: [parentAssetId], references: [id])
+   childAssets     Asset[]        @relation("AssetParent")
+   campaignClips   CampaignClip[]
+   clipScore       ClipScore?
 
-  @@index([eventId])
-  @@index([immichAssetId])
-  @@index([parentAssetId])
-  @@map("assets")
-}
+   @@index([eventId])
+   @@index([immichAssetId])
+   @@index([parentAssetId])
+   @@map("assets")
+ }
 
 model ClipScore {
   id                String    @id @default(cuid())
@@ -108,6 +112,7 @@ model Campaign {
   scriptJson              Json?
   musicUrl                String?
   musicPrompt             String?
+  beatTimestampsJson      Json?                    // beat timestamps for music (for beat-sync cuts in render)
   proxyAssetId            String?
   finalAssetId            String?
   selectedAssetIds        String[]
@@ -194,6 +199,8 @@ model GeneratedAsset {
   @@map("generated_assets")
 }
 
+// DEPRECATED (US-008): Legacy scene storage. All new scenes use child Asset(type=CLIP) with parentAssetId + startTimeMs/endTimeMs.
+// Migration script converts old records. SceneSegment path and this model will be removed after migration + US-010.
 model SceneSegment {
   id          String   @id @default(cuid())
   parentId    String
@@ -273,6 +280,7 @@ model WeeklyCritique {
   topChanges          String[]
   critiqueText        String
   actionItems         String[]
+  suggestedChanges    Json?
   modelUsed           String
   costDIEM            Float?
   createdAt           DateTime @default(now())
@@ -288,12 +296,13 @@ model Job {
   payload     Json?
   attempts    Int       @default(0)
   maxAttempts Int       @default(3)
-  error       String?
-  retryAfter  DateTime?
-  createdAt   DateTime  @default(now())
-  startedAt   DateTime?
-  completedAt DateTime?
-  parentJobId String?
+  error         String?
+  qualityFlags  Json?     // structured partial-failure details (e.g. visionFailed:3, sttFailed:1, fallbacksUsed:true)
+  retryAfter    DateTime?
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+  parentJobId   String?
   parentJob   Job?      @relation("JobParent", fields: [parentJobId], references: [id])
   childJobs   Job[]     @relation("JobParent")
 
@@ -314,24 +323,32 @@ model PushSubscription {
   @@map("push_subscriptions")
 }
 
-model PreFilterScore {
-  id               String   @id @default(cuid())
-  assetId          String
-  eventId          String
-  brightnessScore  Int?
-  blurScore        Int?
-  faceScore        Int?
-  actionScore      Int?
-  compositionScore Int?
-  overallScore     Int?
-  passedFilter     Boolean  @default(false)
-  featuresJson     Json?
-  createdAt        DateTime @default(now())
+model RateLimit {
+  id        String   @id @default(cuid())
+  key       String   @unique // "ip:192.168.1.1" or "user:abc123" or "path:/api/admin/..."
+  tokens    Int      @default(60)
+  resetAt   DateTime
+  updatedAt DateTime @updatedAt
 
-  @@index([assetId])
-  @@index([eventId])
-  @@index([overallScore])
-  @@map("pre_filter_scores")
+  @@map("rate_limits")
+}
+
+model AdminAuditLog {
+  id            String   @id @default(cuid())
+  actor         String // "admin" or partial hash of token for correlation
+  action        String // e.g. "triggered-feedback-analysis", "increased-budget"
+  route         String // "/api/admin/feedback-report/analysis"
+  eventId       String? // nullable string reference (survives Event deletion)
+  costEstimate  Float? // nullable — only for cost-impacting ops
+  ip            String? // from x-forwarded-for / x-real-ip
+  success       Boolean  @default(true)
+  errorMessage  String? // populated on failure
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([route])
+  @@index([actor])
+  @@map("admin_audit_logs")
 }
 
 enum EventStatus {
@@ -426,6 +443,8 @@ enum JobType {
   RENDER_PROXY
   RENDER_FINAL
   GENERATE_MUSIC
+  FEEDBACK_ANALYSIS
+  WEEKLY_CRITIQUE
 }
 
 enum JobStatus {

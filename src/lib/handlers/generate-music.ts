@@ -3,6 +3,8 @@ import {
   queueMusicGeneration,
   retrieveMusic,
 } from "../music-generation";
+import { isEventCircuitPaused, recordJobOutcome, checkAndReserveBudget, refundBudget, estimateMusicGenCost } from "../cost-estimator";
+import { analyzeBeats } from "../beat-sync-service";
 
 const MAX_POLL_ATTEMPTS = 120; // 5s * 120 = 600s = 10 minutes
 const POLL_INTERVAL_MS = 5000;
@@ -30,6 +32,16 @@ export async function handleGenerateMusic({
 
   if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
   if (!campaign.event) throw new Error(`Event not found for campaign ${campaignId}`);
+
+  if (isEventCircuitPaused(eventId)) {
+    throw new Error("circuit paused");
+  }
+  const estM = estimateMusicGenCost();
+  const b = await checkAndReserveBudget(eventId, estM.estimatedDIEM);
+  if (!b.allowed) {
+    await refundBudget(eventId, estM.estimatedDIEM);
+    throw new Error(b.reason || "budget");
+  }
 
   // Try to derive music prompt from scriptJson
   let musicMood = "energetic";
@@ -117,6 +129,26 @@ export async function handleGenerateMusic({
       musicPrompt: prompt,
     },
   });
+
+  // US-012: derive beat timestamps for beat-sync cuts (non-fatal)
+  try {
+    const beat = await analyzeBeats(filePath);
+    await prisma.campaign.update({
+      where: { id: campaignId },
+      data: {
+        beatTimestampsJson: {
+          bpm: beat.bpm,
+          beatTimestamps: beat.beatTimestamps,
+          confidence: beat.confidence,
+        } as any,
+      },
+    });
+    console.log(`[generate-music] Beat timestamps stored for campaign ${campaignId} (${beat.beatTimestamps.length} beats)`);
+  } catch (beatErr) {
+    console.warn(`[generate-music] Beat analysis failed for ${campaignId} (non-fatal):`, beatErr);
+  }
+
+  recordJobOutcome(eventId, true);
 
   console.log(`[generate-music] Music ready at ${filePath} for campaign ${campaignId}`);
 }

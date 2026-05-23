@@ -2,13 +2,12 @@ import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import * as path from "path";
 import { prisma } from "../prisma";
-import { downloadAssetToFile, uploadAssetFromFile, addAssetsToAlbum } from "../immich";
+import { downloadAssetToFile, uploadAssetFromFile, addAssetsToAlbum, updateAssetDescription } from "../immich";
+import { getBeatAlignedDuration, snapToNearestBeat } from "../beat-sync-service";
+import { resolveSceneCut } from "../resolve-scene-cut";
 
 const FINAL_OUTPUT_DIR = "/outputs";
 const SAFETY_MARGIN_MS = 150;
-
-const VENICE_URL = process.env.VENICE_API_URL || "https://api.venice.ai/api/v1";
-const VENICE_KEY = process.env.VENICE_API_KEY || "";
 
 interface RenderFinalPayload {
   campaignId: string;
@@ -30,7 +29,7 @@ export async function handleRenderFinal({
     include: {
       event: true,
       campaignClips: {
-        include: { asset: true },
+        include: { asset: { include: { parentAsset: true } } },
         orderBy: { order: "asc" },
       },
     },
@@ -58,22 +57,12 @@ export async function handleRenderFinal({
   await fs.mkdir(outDir, { recursive: true });
 
   try {
-    // ── 1. Upscale sub-720p clips (Topaz) ──
-    const upscaleMap: Record<string, string> = {}; // assetId → upscaled local path
-    for (const cc of campaign.campaignClips) {
-      const asset = cc.asset;
-      if (!asset) continue;
-      if ((asset.widthPx ?? 9999) < 720) {
-        try {
-          const upscaled = await topazUpscale(asset, workDir);
-          if (upscaled) upscaleMap[asset.id] = upscaled;
-        } catch (err) {
-          console.warn(`[render-final] Topaz upscale failed for ${asset.id}, using original:`, err);
-        }
-      }
-    }
+    // ── 1. No AI upscale (US-011/US-016 decision: Venice /video/enhance has no working production path)
+    // All sources are used at native resolution. Low-res clips (<720px vertical) are rendered as-is
+    // with a visible warning badge in the UI. Effective output resolution is noted in final metadata.
+    const upscaleMap: Record<string, string> = {};
 
-    // ── 2. Download and cut each segment ──
+    // ── 2. Download and cut each segment (scene-aware for child CLIP assets) ──
     const segmentFiles: string[] = [];
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
@@ -85,14 +74,57 @@ export async function handleRenderFinal({
         throw new Error(`Asset ${asset.id} has no immichAssetId`);
       }
 
-      const maxMs = Math.round((asset.durationSeconds || 0) * 1000);
-      const startMs = Math.max(0, clip.startTimeMs);
-      const endMs = maxMs > 0
-        ? Math.min(clip.endTimeMs, maxMs - SAFETY_MARGIN_MS)
-        : clip.endTimeMs;
+      // Resolve correct source (parent for legacy virtual scenes) + absolute cut times
+      const parentRef = asset.parentAsset
+        ? { id: asset.parentAsset.id, immichAssetId: asset.parentAsset.immichAssetId! }
+        : null;
+      const resolved = resolveSceneCut({
+        asset: {
+          id: asset.id,
+          parentAssetId: asset.parentAssetId,
+          immichAssetId: asset.immichAssetId,
+          startTimeMs: asset.startTimeMs,
+          endTimeMs: asset.endTimeMs,
+          durationSeconds: asset.durationSeconds,
+        },
+        parentAsset: parentRef,
+        scriptStartMs: clip.startTimeMs,
+        scriptEndMs: clip.endTimeMs,
+      });
 
-      if (startMs >= endMs) {
-        console.warn(`[render-final] Clip ${clip.assetId} invalid timestamps ${startMs}-${endMs}, skipping`);
+      const sourceImmichId = resolved.downloadImmichId;
+      let cutStartMs = resolved.cutStartMs;
+      let cutEndMs = resolved.cutEndMs;
+
+      // Safety margin + clamp against the actual source duration we will download
+      const sourceDurMs = asset.parentAsset?.durationSeconds
+        ? Math.round(asset.parentAsset.durationSeconds * 1000)
+        : Math.round((asset.durationSeconds || 0) * 1000);
+
+      cutStartMs = Math.max(0, cutStartMs);
+      cutEndMs = sourceDurMs > 0
+        ? Math.min(cutEndMs, sourceDurMs - SAFETY_MARGIN_MS)
+        : cutEndMs;
+
+      // US-012: beat-sync adjustment using existing helpers (when music beat data present)
+      const beatData = (campaign as any).beatTimestampsJson as any;
+      const beats: number[] = Array.isArray(beatData?.beatTimestamps) ? beatData.beatTimestamps : [];
+      if (beats.length > 0) {
+        const intendedDurS = (cutEndMs - cutStartMs) / 1000;
+        const maxDurS = sourceDurMs > 0
+          ? Math.min(intendedDurS * 1.3, (sourceDurMs - SAFETY_MARGIN_MS - cutStartMs) / 1000)
+          : intendedDurS * 1.3;
+        if (maxDurS > 0.1) {
+          const alignedDurS = getBeatAlignedDuration(intendedDurS, beats, maxDurS);
+          const newEndMs = cutStartMs + Math.round(alignedDurS * 1000);
+          if (newEndMs > cutStartMs + 100) {
+            cutEndMs = Math.min(cutEndMs, newEndMs);
+          }
+        }
+      }
+
+      if (cutStartMs >= cutEndMs) {
+        console.warn(`[render-final] Clip ${clip.assetId} invalid timestamps ${cutStartMs}-${cutEndMs}, skipping`);
         continue;
       }
 
@@ -101,11 +133,11 @@ export async function handleRenderFinal({
         : path.join(workDir, `src_${i}_${asset.id}.mp4`);
 
       if (!upscaleMap[asset.id]) {
-        await downloadAssetToFile(asset.immichAssetId, sourcePath);
+        await downloadAssetToFile(sourceImmichId, sourcePath);
       }
 
       const segPath = path.join(workDir, `seg_${i}.mp4`);
-      await cutSegment(sourcePath, segPath, startMs / 1000, endMs / 1000);
+      await cutSegment(sourcePath, segPath, cutStartMs / 1000, cutEndMs / 1000);
       segmentFiles.push(segPath);
 
       if (!upscaleMap[asset.id]) {
@@ -259,6 +291,14 @@ export async function handleRenderFinal({
       },
     });
 
+    // Record effective resolution + no-AI-upscale decision (US-011/US-016)
+    const lowRes = campaign.campaignClips.filter((cc: any) => (cc.asset?.heightPx ?? 9999) < 720);
+    const note = [
+      "GIS 1080x1920 final (no AI upscale applied — US-016 spike: Venice /video/enhance has no working production path)",
+      lowRes.length > 0 ? `Low-res sources (<720p vertical): ${lowRes.map((c: any) => c.assetId).join(", ")}` : "All sources >=720p vertical",
+    ].join("\n");
+    await updateAssetDescription(immichAssetId, note);
+
     // Update campaign
     await prisma.campaign.update({
       where: { id: campaignId },
@@ -279,68 +319,6 @@ export async function handleRenderFinal({
       /* ignore cleanup errors */
     }
   }
-}
-
-async function topazUpscale(asset: any, workDir: string): Promise<string | null> {
-  // Best-effort Venice Topaz Video AI upscale
-  // Venice may expose /api/v1/video/enhance or similar; this is a placeholder
-  // that attempts the call and falls back if unavailable.
-  console.log(`[render-final] Attempting Topaz upscale for asset ${asset.id} (${asset.widthPx}px)`);
-
-  if (!VENICE_KEY) {
-    console.warn("[render-final] No VENICE_API_KEY, skipping Topaz upscale");
-    return null;
-  }
-
-  const localPath = path.join(workDir, `topaz_in_${asset.id}.mp4`);
-  await downloadAssetToFile(asset.immichAssetId, localPath);
-
-  try {
-    const res = await fetch(`${VENICE_URL}/video/enhance`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${VENICE_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        input_url: `file://${localPath}`, // Venice may not support file://; this is best-effort
-        upscale_factor: 2,
-        model: "topaz-video-2x",
-      }),
-    });
-
-    if (!res.ok) {
-      console.warn(`[render-final] Topaz API returned ${res.status}, using original`);
-      return null;
-    }
-
-    const data = await res.json();
-    const jobId = data.job_id;
-    if (!jobId) return null;
-
-    // Poll for completion
-    const outPath = path.join(workDir, `topaz_out_${asset.id}.mp4`);
-    for (let i = 0; i < 120; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      const statusRes = await fetch(`${VENICE_URL}/video/enhance/${jobId}`, {
-        headers: { Authorization: `Bearer ${VENICE_KEY}` },
-      });
-      if (!statusRes.ok) continue;
-      const status = await statusRes.json();
-      if (status.status === "completed" && status.output_url) {
-        const dlRes = await fetch(status.output_url);
-        if (dlRes.ok) {
-          await fs.writeFile(outPath, Buffer.from(await dlRes.arrayBuffer()));
-          return outPath;
-        }
-      }
-      if (status.status === "failed") break;
-    }
-  } catch (err) {
-    console.warn("[render-final] Topaz upscale error:", err);
-  }
-
-  return null;
 }
 
 async function cutSegment(

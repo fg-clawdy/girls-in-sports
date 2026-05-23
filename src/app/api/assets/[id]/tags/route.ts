@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { syncTagsToImmich } from "@/lib/immich";
+import { mkdir, writeFile } from "fs/promises";
+import path from "path";
 
 export async function POST(
   request: Request,
@@ -25,12 +27,36 @@ export async function POST(
       // Sync to Immich
       const asset = await prisma.asset.findUnique({
         where: { id: params.id },
-        select: { immichAssetId: true, assetTags: { select: { tag: true } } },
+        select: { immichAssetId: true, eventId: true, assetTags: { select: { tag: true } } },
       });
 
       if (asset?.immichAssetId) {
         const allTags = asset.assetTags.map((t) => t.tag);
         await syncTagsToImmich(asset.immichAssetId, allTags);
+      }
+
+      const addedThumbnail = Array.isArray(tags) && tags.some((t: string) => t.trim().toLowerCase() === "thumbnail");
+      if (addedThumbnail && asset?.immichAssetId && asset.eventId) {
+        try {
+          const origin = new URL(request.url).origin;
+          const thumbUrl = `${origin}/api/immich/thumbnail/${asset.immichAssetId}`;
+          const thumbRes = await fetch(thumbUrl);
+          if (thumbRes.ok) {
+            const blob = await thumbRes.blob();
+            const buffer = Buffer.from(await blob.arrayBuffer());
+            const thumbnailsDir = path.join(process.cwd(), "public", "thumbnails");
+            await mkdir(thumbnailsDir, { recursive: true });
+            const thumbnailPath = path.join(thumbnailsDir, `${asset.eventId}.jpg`);
+            await writeFile(thumbnailPath, buffer);
+            await prisma.event.update({
+              where: { id: asset.eventId },
+              data: { thumbnailUrl: `/thumbnails/${asset.eventId}.jpg` },
+            });
+            console.log(`[US-015] Saved manual thumbnail for event ${asset.eventId} from asset ${params.id}`);
+          }
+        } catch (thumbErr) {
+          console.warn("[US-015] Failed to save manual thumbnail:", thumbErr);
+        }
       }
 
       return NextResponse.json({ synced: tags.length });

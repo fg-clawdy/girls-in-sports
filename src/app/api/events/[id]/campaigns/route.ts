@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { enqueueJob, JobType } from "@/lib/job-worker";
+import { estimateDirectScriptCost, checkAndReserveBudget } from "@/lib/cost-estimator";
 
 export async function GET(
   _request: Request,
@@ -50,6 +51,36 @@ export async function POST(
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
+    const clipCount = selectedAssetIds.length;
+    const hasIntent = !!(brief && brief.trim());
+    const est = estimateDirectScriptCost(clipCount, hasIntent);
+    const budgetCheck = await checkAndReserveBudget(params.id, est.estimatedDIEM);
+    if (!budgetCheck.allowed) {
+      return NextResponse.json({ error: budgetCheck.reason || "Budget exceeded" }, { status: 402 });
+    }
+
+    // Fetch selected assets (with parent linkage) so we can preserve precise child-scene timing on CampaignClip
+    const selectedAssets = await prisma.asset.findMany({
+      where: { id: { in: selectedAssetIds } },
+      select: {
+        id: true,
+        immichAssetId: true,
+        parentAssetId: true,
+        startTimeMs: true,
+        endTimeMs: true,
+        durationSeconds: true,
+      },
+    });
+    const parentIds = Array.from(new Set(selectedAssets.map((a) => a.parentAssetId).filter((id): id is string => !!id)));
+    const parents = parentIds.length
+      ? await prisma.asset.findMany({
+          where: { id: { in: parentIds } },
+          select: { id: true, immichAssetId: true },
+        })
+      : [];
+    const parentImmichById = new Map(parents.map((p) => [p.id, p.immichAssetId]));
+    const assetMeta = new Map(selectedAssets.map((a) => [a.id, a]));
+
     // Create campaign
     const campaign = await prisma.campaign.create({
       data: {
@@ -63,15 +94,35 @@ export async function POST(
       },
     });
 
-    // Create CampaignClip rows for each selected asset
+    // Create CampaignClip rows — for child CLIP scenes, store the precise timing window
+    // (absolute in parent video for legacy virtual scenes; 0..duration for real pre-cut children)
     await prisma.campaignClip.createMany({
-      data: selectedAssetIds.map((assetId: string, idx: number) => ({
-        campaignId: campaign.id,
-        assetId,
-        order: idx,
-        accepted: true,
-        mustInclude: (mustIncludeAssetIds ?? []).includes(assetId),
-      })),
+      data: selectedAssetIds.map((assetId: string, idx: number) => {
+        const a = assetMeta.get(assetId);
+        let st: number | null = null;
+        let et: number | null = null;
+        if (a && a.startTimeMs != null && a.endTimeMs != null) {
+          const parentImmich = a.parentAssetId ? parentImmichById.get(a.parentAssetId) : null;
+          if (a.parentAssetId && parentImmich && a.immichAssetId === parentImmich) {
+            // legacy virtual scene: times are absolute within the shared parent source video
+            st = a.startTimeMs;
+            et = a.endTimeMs;
+          } else {
+            // real child CLIP (own immich id): 0-based within this asset's video
+            st = 0;
+            et = Math.round((a.durationSeconds || 0) * 1000);
+          }
+        }
+        return {
+          campaignId: campaign.id,
+          assetId,
+          order: idx,
+          accepted: true,
+          mustInclude: (mustIncludeAssetIds ?? []).includes(assetId),
+          startTimeMs: st,
+          endTimeMs: et,
+        };
+      }),
     });
 
     // Enqueue DIRECT_SCRIPT job

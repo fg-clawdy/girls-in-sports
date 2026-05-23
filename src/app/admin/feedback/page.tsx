@@ -49,7 +49,7 @@ export default function AdminFeedbackPage() {
 
   async function fetchReport() {
     try {
-      const res = await fetch("/api/admin/feedback-report?token=gis-local-dev");
+      const res = await fetch("/api/admin/feedback-report", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to load report");
       const data = await res.json();
       setReport(data);
@@ -62,7 +62,7 @@ export default function AdminFeedbackPage() {
 
   async function fetchLatestAnalysis() {
     try {
-      const res = await fetch("/api/admin/feedback-report/analysis?token=gis-local-dev");
+      const res = await fetch("/api/admin/feedback-report/analysis", { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
         if (data.analysis) setAnalysis(data.analysis);
@@ -75,8 +75,9 @@ export default function AdminFeedbackPage() {
   async function runAnalysis() {
     setAnalyzing(true);
     try {
-      const res = await fetch("/api/admin/feedback-report/analysis?token=gis-local-dev", {
+      const res = await fetch("/api/admin/feedback-report/analysis", {
         method: "POST",
+        credentials: "include",
       });
       if (!res.ok) throw new Error("Analysis failed");
       const data = await res.json();

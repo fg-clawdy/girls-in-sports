@@ -932,8 +932,20 @@ This document, together with the existing `CODE_ASSESSMENT.md`, `PRD-gis-ai-refi
 - No dead-letter queue rewrite; existing job retry UI + error field already covers full failures.
 - Unlocks honest "partial success" visibility for curators without changing core scoring behavior.
 
-**Next:** US-015 (Thumbnail Auto-Select Improvements) — Priority 5.
+**US-015: Thumbnail Auto-Select Improvements — COMPLETED 2026-05-23**
+
+**AC1 ✅** Per-asset best-frame selection (bestFrame + finalScores[0] from batch-ranking response) now drives Event.thumbnailUrl instead of raw highest compositeScore.
+**AC2 ✅** Composite score (0.5 vision + 0.3 audio + 0.2 motion) + has* boost (hasFaces/hasCoachSpeech/hasActionKeyword) used for final auto selection; legacy virtual-scene path (same-immich child clips) guarded to skip thumbnail side-effect.
+**AC3 ✅** USER_MANUAL "thumbnail" AssetTag acts as hard lock — prevents auto-overwrite; UI POST /api/assets/[id]/tags and GET /api/immich/thumbnail now keep Event.thumbnailUrl + Immich description in sync.
+**AC4 ✅** Event detail page (app/events/[id]/page.tsx) adds prominent 📷 "Set as Thumbnail" button on scored clips (re-uses existing fetchEventData + POST pattern); shows current thumbnail preview in header.
+**AC5 ✅** score-clip-scenes.test.ts (existing US-009 legacy-child test) extended with exactly 1 new it() block exercising USER_MANUAL guard + findMany best-composite selection inside handleScoreClip.
+
+Reused / followed existing patterns: batch-ranking response shape (bestFrame/finalScores), tags POST/immich proxy, score-clip composite calc + legacy window path, event page header + fetchEventData/POST, prisma mock + it() extension style from prior stories.
+No new comments added to source (per girls-in-sports + prd-completor rules).
+All 5 ACs + original high-level story satisfied. No regressions.
+
+**Next:** US-018 (Capture Baseline Metrics for Flywheel KPIs) — Priority 5 per roadmap.
 
 ---
 
-*End of PRD-PROD-READINESS.md (US-014 complete — Structured qualityFlags + user-facing partial-failure messages active)*
+*End of PRD-PROD-READINESS.md (US-015 complete — Thumbnail Auto-Select + manual override + legacy guard + UI button live)*

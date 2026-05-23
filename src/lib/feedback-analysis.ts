@@ -18,6 +18,50 @@ interface AnalysisInput {
   sentimentByType: Record<string, { positive: number; negative: number; total: number }>;
 }
 
+// Shared types and validator for US-005 structured patch suggestions (used by weekly-critique-service too)
+export interface SuggestedChange {
+  file: string;
+  description: string;
+  diff: string;
+  confidence: number;
+  rationale: string;
+}
+
+export const ALLOWED_FILES = [
+  "src/lib/tier-formulas.ts",
+  "src/lib/prompt-engineer.ts",
+  "src/lib/beat-sync-service.ts",
+  "src/lib/scene-detection-service.ts",
+  "src/lib/vision.ts",
+  "src/lib/music-generation.ts",
+  "scripts/analyze_beats.py",
+];
+
+export function validateSuggestedChange(change: unknown): { valid: boolean; error?: string; change?: SuggestedChange } {
+  if (!change || typeof change !== "object") return { valid: false, error: "not an object" };
+  const c = change as Record<string, unknown>;
+  if (typeof c.file !== "string" || !ALLOWED_FILES.includes(c.file)) {
+    return { valid: false, error: `file not in allowlist: ${c.file}` };
+  }
+  if (typeof c.diff !== "string" || !c.diff.startsWith("--- a/") || !c.diff.includes("+++ b/")) {
+    return { valid: false, error: "diff must be unified format starting with --- a/ and +++ b/" };
+  }
+  const lineCount = c.diff.split("\n").length;
+  if (lineCount > 55) return { valid: false, error: "diff too large (>50 lines)" };
+  const conf = typeof c.confidence === "number" ? c.confidence : parseFloat(String(c.confidence));
+  if (isNaN(conf) || conf < 0 || conf > 1) return { valid: false, error: "confidence must be 0.0-1.0" };
+  return {
+    valid: true,
+    change: {
+      file: c.file,
+      description: String(c.description || ""),
+      diff: c.diff,
+      confidence: conf,
+      rationale: String(c.rationale || ""),
+    },
+  };
+}
+
 /**
  * Aggregate CampaignFeedback from the past 30 days and send to Venice
  * reasoning model for actionable recommendations.
@@ -26,6 +70,7 @@ export async function runFeedbackAnalysis(): Promise<{
   id: string;
   recommendations: string;
   feedbackCount: number;
+  suggestedChanges: SuggestedChange[];
 }> {
   const since = new Date();
   since.setDate(since.getDate() - 30);
@@ -94,16 +139,19 @@ export async function runFeedbackAnalysis(): Promise<{
     sentimentByType,
   };
 
-  const reportJson = JSON.parse(JSON.stringify(input));
+  // Send to Venice reasoning model (now returns both text + structured suggestions per US-005)
+  const llmOutput = await getRecommendationsFromLLM(input);
 
-  // Send to Venice reasoning model
-  const recommendations = await getRecommendationsFromLLM(input);
+  const reportJson = {
+    ...JSON.parse(JSON.stringify(input)),
+    suggestedChanges: llmOutput.suggestedChanges,
+  };
 
-  // Store in FeedbackAnalysisReport
+  // Store in FeedbackAnalysisReport (suggestions live inside reportJson)
   const report = await prisma.feedbackAnalysisReport.create({
     data: {
       reportJson,
-      recommendations,
+      recommendations: llmOutput.recommendations,
       feedbackCount: feedbacks.length,
     },
   });
@@ -112,25 +160,39 @@ export async function runFeedbackAnalysis(): Promise<{
 
   return {
     id: report.id,
-    recommendations,
+    recommendations: llmOutput.recommendations,
     feedbackCount: feedbacks.length,
+    suggestedChanges: llmOutput.suggestedChanges,
   };
 }
 
-async function getRecommendationsFromLLM(input: AnalysisInput): Promise<string> {
+async function getRecommendationsFromLLM(input: AnalysisInput): Promise<{
+  recommendations: string;
+  suggestedChanges: SuggestedChange[];
+}> {
   if (!VENICE_API_KEY) {
-    return "VENICE_API_KEY not configured. Recommendations unavailable.";
+    return { recommendations: "VENICE_API_KEY not configured. Recommendations unavailable.", suggestedChanges: [] };
   }
 
-  const systemPrompt = `You are a product analytics expert for a sports video marketing platform called Girls In Sports.
-Analyze the provided feedback data and produce 3-5 specific, actionable recommendations.
-Focus on:
-1. Score weight adjustments (vision/audio/motion currently at 50/30/20)
-2. Duration threshold changes for scene detection (currently 3-120s)
-3. Keyword list gaps for speech-to-text scoring
-4. Music generation prompt improvements
-
-Be concise. Use bullet points. Each recommendation should be 1-2 sentences with specific numbers.`;
+  const systemPrompt = `You are an expert GIS tuning engineer for Girls In Sports.
+You must output ONLY valid JSON (no markdown, no prose outside the JSON) with this exact shape:
+{
+  "recommendations": "3-5 concise bullet-point recommendations (1-2 sentences each, with specific numbers)",
+  "suggestedChanges": [
+    {
+      "file": "src/lib/tier-formulas.ts",
+      "description": "short human-readable summary",
+      "diff": "--- a/src/lib/tier-formulas.ts\n+++ b/src/lib/tier-formulas.ts\n@@ -42,7 +42,7 @@\n-  old line\n+  new line\n",
+      "confidence": 0.82,
+      "rationale": "why this change based on the feedback data"
+    }
+  ]
+}
+Rules:
+- Only target the allowlisted files: src/lib/tier-formulas.ts, src/lib/prompt-engineer.ts, src/lib/beat-sync-service.ts, src/lib/scene-detection-service.ts, src/lib/vision.ts, src/lib/music-generation.ts, scripts/analyze_beats.py
+- diff MUST be minimal unified diff format, <= 50 lines total changed, start with --- a/ and +++ b/, at most one @@ hunk.
+- confidence 0.0-1.0 (suppress <0.7 in UI later).
+- Never invent new files or touch unlisted code. Produce concrete, reviewable patches only.`;
 
   const userPrompt = `Feedback data (past 30 days):
 - Total feedback: ${input.totalFeedback}
@@ -145,7 +207,7 @@ ${Object.entries(input.sentimentByType)
   .map(([type, stats]) => `- ${type}: ${stats.positive}/${stats.total} positive (${((stats.positive / stats.total) * 100).toFixed(0)}%)`)
   .join("\n")}
 
-Provide actionable recommendations.`;
+Return the JSON object now.`;
 
   const res = await fetch(`${VENICE_API_URL}/chat/completions`, {
     method: "POST",
@@ -159,7 +221,7 @@ Provide actionable recommendations.`;
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      max_tokens: 1200,
+      max_tokens: 1400,
       temperature: 0.3,
       reasoning_effort: "medium",
       strip_reasoning_response: true,
@@ -172,7 +234,32 @@ Provide actionable recommendations.`;
   }
 
   const data = await res.json();
-  return data.choices?.[0]?.message?.content?.trim() || "No recommendations generated.";
+  const raw = data.choices?.[0]?.message?.content?.trim() || "{}";
+
+  // Robust JSON extraction (handles ```json blocks or bare object)
+  let jsonStr = raw;
+  const codeBlock = raw.match(/```json\s*([\s\S]*?)\s*```/);
+  if (codeBlock) jsonStr = codeBlock[1];
+  else {
+    const first = raw.indexOf("{");
+    const last = raw.lastIndexOf("}");
+    if (first !== -1 && last !== -1) jsonStr = raw.slice(first, last + 1);
+  }
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+    const recs = String(parsed.recommendations || "No recommendations generated.");
+    const rawChanges: unknown[] = Array.isArray(parsed.suggestedChanges) ? parsed.suggestedChanges : [];
+    const validated: SuggestedChange[] = [];
+    for (const ch of rawChanges) {
+      const v = validateSuggestedChange(ch);
+      if (v.valid && v.change) validated.push(v.change);
+    }
+    return { recommendations: recs, suggestedChanges: validated };
+  } catch (e) {
+    console.error("[feedback-analysis] Failed to parse LLM JSON for suggestions:", raw.slice(0, 800));
+    return { recommendations: raw, suggestedChanges: [] };
+  }
 }
 
 function extractThemes(texts: string[]): Array<{ theme: string; count: number }> {

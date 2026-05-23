@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -13,6 +13,7 @@ interface EventData {
   city: string;
   eventDate: string;
   description: string | null;
+  thumbnailUrl?: string | null;
   immichAlbumId: string | null;
   qualityTier: "AMATEUR" | "INTERMEDIATE" | "PROFESSIONAL";
 }
@@ -55,6 +56,11 @@ interface ClipData {
   tieredScore?: number;
   tieredPasses?: boolean;
   assetTags: Array<{ tag: string; source: string; confidence: number | null }>;
+  parentAssetId?: string | null;
+  startTimeMs?: number | null;
+  endTimeMs?: number | null;
+  heightPx?: number | null;
+  widthPx?: number | null;
 }
 
 interface JobItem {
@@ -64,6 +70,7 @@ interface JobItem {
   attempts: number;
   maxAttempts: number;
   error: string | null;
+  qualityFlags?: any; // { visionFailedBatches?: number, visionUsedFallback?: boolean, ... }
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -188,6 +195,7 @@ function formatDuration(startedAt: string | null) {
 export default function EventPage() {
   const { id } = useParams();
   const eventId = Array.isArray(id) ? id[0] : id;
+  const router = useRouter();
 
   // ── Event & Album ──
   const [event, setEvent] = useState<EventData | null>(null);
@@ -443,9 +451,26 @@ export default function EventPage() {
     setMustIncludeMap((prev) => ({ ...prev, [clipId]: !prev[clipId] }));
   };
 
+  const setAsThumbnail = async (clipId: string) => {
+    try {
+      await fetch(`/api/assets/${clipId}/tags`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: ["thumbnail"], action: "add" }),
+      });
+      await fetchEventData();
+      router.refresh();
+    } catch {
+      setError("Failed to set thumbnail");
+    }
+  };
+
   const selectAllAccepted = () => {
     const map: Record<string, boolean> = {};
-    sortedClips.forEach((c) => (map[c.id] = true));
+    const hasScenes = sortedClips.some((c) => c.parentAssetId);
+    sortedClips.forEach((c) => {
+      map[c.id] = hasScenes ? !!c.parentAssetId : true;
+    });
     setAcceptedMap((prev) => ({ ...prev, ...map }));
   };
 
@@ -605,6 +630,13 @@ export default function EventPage() {
             </span>
           </div>
           {event.description && <p className="text-zinc-600 mt-2">{event.description}</p>}
+          {event.thumbnailUrl && (
+            <img
+              src={event.thumbnailUrl}
+              alt="Event thumbnail"
+              className="mt-3 w-40 h-24 object-cover rounded border border-zinc-200"
+            />
+          )}
         </div>
       </header>
 
@@ -868,15 +900,31 @@ export default function EventPage() {
               </div>
             </aside>
 
+            {/* Quality / partial failure banner (US-014) */}
+            {(() => {
+              const visionBad = jobs.filter((j) => {
+                const q = j.qualityFlags as any;
+                return q && (q.visionFailedBatches > 0 || q.visionUsedFallback === true);
+              });
+              if (visionBad.length === 0) return null;
+              const totalFailed = visionBad.reduce((sum, j) => sum + ((j.qualityFlags as any)?.visionFailedBatches || 0), 0);
+              return (
+                <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  Vision analysis had issues on some clips{totalFailed > 0 ? ` (fallback used for ${totalFailed} batches)` : ""} — results may be less accurate. Check Active Jobs for details.
+                </div>
+              );
+            })()}
+
             {/* Clip grid */}
             <section className="lg:col-span-3">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-zinc-900">
-                  Scored Clips
-                  <span className="ml-2 text-sm font-normal text-zinc-500">
-                    {sortedClips.length} shown
-                  </span>
-                </h3>
+                 <h3 className="text-lg font-semibold text-zinc-900">
+                   Scored Clips
+                   <span className="ml-2 text-sm font-normal text-zinc-500">
+                     {sortedClips.length} shown
+                     {sortedClips.some((c) => c.parentAssetId) && ` (${sortedClips.filter((c) => c.parentAssetId).length} scenes)`}
+                   </span>
+                 </h3>
                 <button
                   onClick={selectAllAccepted}
                   className="px-3 py-1.5 rounded-md text-sm font-medium bg-white text-zinc-700 border border-zinc-200 hover:bg-zinc-50"
@@ -934,19 +982,25 @@ export default function EventPage() {
                               {score.toFixed(1)}
                             </span>
                           )}
-                          {clip.durationSeconds && (
-                            <span className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">
-                              {clip.durationSeconds.toFixed(1)}s
-                            </span>
-                          )}
+                           {clip.durationSeconds && (
+                             <span className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">
+                               {clip.durationSeconds.toFixed(1)}s
+                             </span>
+                           )}
+                           {(clip.heightPx ?? 9999) < 720 && (
+                             <span className="absolute top-2 right-2 bg-amber-500 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded tracking-wide">
+                               SD
+                             </span>
+                           )}
                         </div>
 
                         {/* Info */}
                         <div className="p-3 space-y-2">
                           <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold text-zinc-700 uppercase tracking-wide">
-                              {type}
-                            </span>
+                             <span className="text-xs font-semibold text-zinc-700 uppercase tracking-wide">
+                               {clip.parentAssetId ? "SCENE" : type}
+                               {clip.startTimeMs != null && ` ${(clip.startTimeMs/1000).toFixed(1)}s`}
+                             </span>
                             <div className="flex items-center gap-1.5">
                               <span className="text-[10px] text-zinc-500">
                                 M:{(clip.clipScore?.momentScore ?? 0).toFixed(0)}
@@ -997,6 +1051,13 @@ export default function EventPage() {
                               }`}
                             >
                               &#9733;
+                            </button>
+                            <button
+                              onClick={() => setAsThumbnail(clip.id)}
+                              title="Set as thumbnail"
+                              className={`px-2 py-1.5 rounded-md text-xs font-bold border transition-colors bg-white text-zinc-400 border-zinc-200 hover:text-blue-600`}
+                            >
+                              📷
                             </button>
                           </div>
                         </div>

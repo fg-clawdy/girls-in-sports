@@ -1,6 +1,7 @@
 import { PrismaClient, AssetStatus, AssetTagSource, ClipType } from "@prisma/client";
 import { spawn } from "child_process";
 import { promises as fs, readFileSync } from "fs";
+import { mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { prisma } from "../prisma";
 import { downloadAssetToFile, updateAssetDescription } from "../immich";
@@ -225,21 +226,40 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       });
     }
 
-    // ── 12. Set highest-scoring clip's best frame as Event thumbnail ──
-    const eventAssets = await prisma.asset.findMany({
-      where: { eventId, status: AssetStatus.SCORED },
-      include: { clipScore: true },
+    const hasManualThumbnailTag = await prisma.assetTag.findFirst({
+      where: { tag: "thumbnail", source: "USER_MANUAL", asset: { eventId } },
     });
-    const scoredAssets = eventAssets.filter((a) => a.clipScore);
-    if (scoredAssets.length > 0) {
-      const best = scoredAssets.reduce((max, a) =>
-        (a.clipScore?.compositeScore || 0) > (max.clipScore?.compositeScore || 0) ? a : max
-      );
-      if (best.id === assetId) {
-        await prisma.event.update({
-          where: { id: eventId },
-          data: { description: best.immichAssetId || undefined },
-        });
+    if (!hasManualThumbnailTag) {
+      const eventAssets = await prisma.asset.findMany({
+        where: { eventId, status: AssetStatus.SCORED },
+        include: { clipScore: true },
+      });
+      const scoredAssets = eventAssets.filter((a) => a.clipScore);
+      if (scoredAssets.length > 0) {
+        const best = scoredAssets.reduce((max, a) =>
+          (a.clipScore?.compositeScore || 0) > (max.clipScore?.compositeScore || 0) ? a : max
+        );
+        if (best.id === assetId && best.immichAssetId) {
+          try {
+            const origin = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+            const thumbUrl = `${origin}/api/immich/thumbnail/${best.immichAssetId}`;
+            const thumbRes = await fetch(thumbUrl);
+            if (thumbRes.ok) {
+              const blob = await thumbRes.blob();
+              const buffer = Buffer.from(await blob.arrayBuffer());
+              const thumbnailsDir = join(process.cwd(), "public", "thumbnails");
+              await mkdir(thumbnailsDir, { recursive: true });
+              const thumbnailPath = join(thumbnailsDir, `${eventId}.jpg`);
+              await writeFile(thumbnailPath, buffer);
+              await prisma.event.update({
+                where: { id: eventId },
+                data: { thumbnailUrl: `/thumbnails/${eventId}.jpg` },
+              });
+            }
+          } catch (thumbErr) {
+            console.warn("[US-015] Failed to save legacy thumbnail:", thumbErr);
+          }
+        }
       }
     }
 

@@ -3,6 +3,7 @@
 
 import { prisma } from "./prisma";
 import type { CompositionFeedback, Prisma } from "@prisma/client";
+import { type SuggestedChange, validateSuggestedChange, ALLOWED_FILES } from "./feedback-analysis";
 
 interface WeeklyFeedbackAggregate {
   total: number;
@@ -109,7 +110,7 @@ function getConfig(): CritiqueConfig {
   };
 }
 
-const CRITIQUE_SYSTEM_PROMPT = `You are a senior video editor and brand strategist for Girls In Sports (GIS), a youth sports camp brand.
+const CRITIQUE_SYSTEM_PROMPT = `You are an expert GIS tuning engineer for Girls In Sports (GIS), a youth sports camp brand.
 
 Your task: Analyze a week's worth of composition feedback data and produce a strategic critique report.
 
@@ -120,15 +121,21 @@ Output MUST be valid JSON with no markdown, no explanations outside the JSON. Fo
   "topIssues": ["string", "string", ...],
   "topLiked": ["string", "string", ...],
   "topChanges": ["string", "string", ...],
-  "actionItems": ["string", "string", ...]
+  "actionItems": ["string", "string", ...],
+  "suggestedChanges": [
+    {
+      "file": "src/lib/tier-formulas.ts",
+      "description": "short summary",
+      "diff": "--- a/...\n+++ b/...\n@@ ... @@\n",
+      "confidence": 0.82,
+      "rationale": "based on feedback data"
+    }
+  ]
 }
 
 Guidelines:
-- critiqueText: Identify patterns in what worked and what didn't. Be specific but concise.
-- topIssues: The 3-5 most common problems (extracted from feedback + freeform text).
-- topLiked: The 3-5 things users appreciated most (themes from likedMost field).
-- topChanges: The 3-5 things users want changed (themes from wouldChange field).
-- actionItems: Concrete, actionable improvements for the AI pipeline (e.g., "Increase default clip duration by 1s", "Prioritize clips with ball-in-frame for soccer events").`;
+- critiqueText, topIssues, topLiked, topChanges, actionItems: as before.
+- suggestedChanges: only for files in the allowlist (tier-formulas.ts, prompt-engineer.ts, beat-sync-service.ts, scene-detection-service.ts, vision.ts, music-generation.ts, scripts/analyze_beats.py). Produce minimal unified diffs (≤50 lines), confidence 0.0-1.0. Never touch unlisted files. Concrete, reviewable patches only.`;
 
 interface LLMCritiqueResult {
   critiqueText: string;
@@ -136,6 +143,7 @@ interface LLMCritiqueResult {
   topLiked: string[];
   topChanges: string[];
   actionItems: string[];
+  suggestedChanges: SuggestedChange[];
 }
 
 async function generateCritiqueWithLLM(
@@ -184,13 +192,20 @@ async function generateCritiqueWithLLM(
 
   try {
     const parsed = JSON.parse(jsonStr);
-    return {
+    const base = {
       critiqueText: String(parsed.critiqueText || ""),
       topIssues: Array.isArray(parsed.topIssues) ? parsed.topIssues.map(String) : [],
       topLiked: Array.isArray(parsed.topLiked) ? parsed.topLiked.map(String) : [],
       topChanges: Array.isArray(parsed.topChanges) ? parsed.topChanges.map(String) : [],
       actionItems: Array.isArray(parsed.actionItems) ? parsed.actionItems.map(String) : [],
+      suggestedChanges: [] as SuggestedChange[],
     };
+    const rawChanges: unknown[] = Array.isArray(parsed.suggestedChanges) ? parsed.suggestedChanges : [];
+    for (const ch of rawChanges) {
+      const v = validateSuggestedChange(ch);
+      if (v.valid && v.change) base.suggestedChanges.push(v.change);
+    }
+    return base;
   } catch (parseErr) {
     console.error("Failed to parse critique LLM response:", rawContent.slice(0, 1000));
     throw new Error(`Invalid critique JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
@@ -247,6 +262,7 @@ export interface WeeklyCritiqueResult {
   topChanges: string[];
   critiqueText: string;
   actionItems: string[];
+  suggestedChanges: SuggestedChange[];
   modelUsed: string;
   costDIEM: number;
 }
@@ -284,6 +300,7 @@ export async function generateWeeklyCritique(
         topChanges: [],
         critiqueText: "No feedback received this week.",
         actionItems: [],
+        suggestedChanges: [],
         modelUsed: "none",
         costDIEM: 0,
       },
@@ -300,6 +317,7 @@ export async function generateWeeklyCritique(
       topChanges: [],
       critiqueText: empty.critiqueText,
       actionItems: [],
+      suggestedChanges: [],
       modelUsed: "none",
       costDIEM: 0,
     };
@@ -337,6 +355,7 @@ export async function generateWeeklyCritique(
       topChanges: llmResult.topChanges.slice(0, 5),
       critiqueText: llmResult.critiqueText,
       actionItems: llmResult.actionItems.slice(0, 5),
+      suggestedChanges: JSON.parse(JSON.stringify(llmResult.suggestedChanges || [])) as any,
       modelUsed: config.model,
       costDIEM,
     },
@@ -354,6 +373,7 @@ export async function generateWeeklyCritique(
     topChanges: record.topChanges,
     critiqueText: record.critiqueText,
     actionItems: record.actionItems,
+    suggestedChanges: ((record.suggestedChanges as unknown) as SuggestedChange[]) || [],
     modelUsed: record.modelUsed,
     costDIEM: record.costDIEM || 0,
   };
@@ -379,6 +399,7 @@ function generateFallbackCritique(aggregate: WeeklyFeedbackAggregate): LLMCritiq
       "Address most common issues in next week's pipeline updates",
       "Experiment with clip duration adjustments based on feedback",
     ],
+    suggestedChanges: [],
   };
 }
 

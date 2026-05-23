@@ -122,11 +122,12 @@ export async function handleIngestClip(payload: unknown): Promise<void> {
             status: AssetStatus.UPLOADED,
             filePath: clipName,
             durationSeconds: end - start,
+            startTimeMs: Math.round(start * 1000),
+            endTimeMs: Math.round(end * 1000),
             sizeBytes: (await fs.stat(clipPath)).size,
           },
         });
 
-        // ── 6. Enqueue SCORE_CLIP job ──
         await prisma.job.create({
           data: {
             type: "SCORE_CLIP",

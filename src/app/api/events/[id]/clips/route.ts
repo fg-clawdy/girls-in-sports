@@ -31,7 +31,17 @@ export async function GET(
         ],
         status: "SCORED",
       },
-      include: {
+      select: {
+        id: true,
+        immichAssetId: true,
+        durationSeconds: true,
+        type: true,
+        status: true,
+        parentAssetId: true,
+        startTimeMs: true,
+        endTimeMs: true,
+        heightPx: true,
+        widthPx: true,
         clipScore: true,
         assetTags: true,
       },

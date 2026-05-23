@@ -1,20 +1,12 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-
-function isAdminAuth(request: Request): boolean {
-  // Simple admin check: look for a secret header or query param
-  // In production this should use proper session/auth middleware
-  const url = new URL(request.url);
-  const adminToken = url.searchParams.get("token") || request.headers.get("x-admin-token");
-  return adminToken === process.env.ADMIN_SECRET || adminToken === "gis-local-dev";
-}
+import { requireAdmin } from "@/lib/auth";
 
 export async function GET(request: Request) {
-  try {
-    if (!isAdminAuth(request)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+  const adminCheck = await requireAdmin(request);
+  if (adminCheck instanceof NextResponse) return adminCheck;
 
+  try {
     // Past 30 days of feedback
     const since = new Date();
     since.setDate(since.getDate() - 30);

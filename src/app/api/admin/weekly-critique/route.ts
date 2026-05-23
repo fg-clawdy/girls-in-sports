@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { generateWeeklyCritique } from "@/lib/weekly-critique-service";
+import { requireAdmin } from "@/lib/auth";
 
 /**
  * POST /api/admin/weekly-critique
@@ -10,6 +11,9 @@ import { generateWeeklyCritique } from "@/lib/weekly-critique-service";
  * Optional body: { weekStart?: "YYYY-MM-DD" } to analyze a specific week.
  */
 export async function POST(request: Request) {
+  const adminCheck = await requireAdmin(request);
+  if (adminCheck instanceof NextResponse) return adminCheck;
+
   try {
     let weekStart: Date | undefined;
 
@@ -41,6 +45,7 @@ export async function POST(request: Request) {
         topChanges: result.topChanges,
         critiqueText: result.critiqueText,
         actionItems: result.actionItems,
+        suggestedChanges: result.suggestedChanges || [],
         modelUsed: result.modelUsed,
         costDIEM: result.costDIEM,
       },
@@ -64,9 +69,44 @@ export async function POST(request: Request) {
  *
  * List existing weekly critiques, most recent first.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  const adminCheck = await requireAdmin(request);
+  if (adminCheck instanceof NextResponse) return adminCheck;
+
   try {
+    const url = new URL(request.url);
+    const requestedId = url.searchParams.get("id");
+
     const { prisma } = await import("@/lib/prisma");
+
+    if (requestedId) {
+      // Specific full weekly critique (for US-007 equivalent)
+      const critique = await prisma.weeklyCritique.findUnique({ where: { id: requestedId } });
+      return NextResponse.json({
+        success: true,
+        critique: critique
+          ? {
+              id: critique.id,
+              weekStart: critique.weekStart.toISOString(),
+              weekEnd: critique.weekEnd.toISOString(),
+              totalFeedback: critique.totalFeedback,
+              avgProductionWorthy: critique.avgProductionWorthy,
+              avgRatings: critique.avgRatings,
+              topIssues: critique.topIssues,
+              topLiked: critique.topLiked,
+              topChanges: critique.topChanges,
+              critiqueText: critique.critiqueText,
+              actionItems: critique.actionItems,
+              suggestedChanges: (critique.suggestedChanges as any) || [],
+              appliedSuggestions: (critique as any).appliedSuggestions || {}, // future-proof
+              modelUsed: critique.modelUsed,
+              costDIEM: critique.costDIEM,
+              createdAt: critique.createdAt.toISOString(),
+            }
+          : null,
+      });
+    }
+
     const critiques = await prisma.weeklyCritique.findMany({
       orderBy: { weekStart: "desc" },
       take: 12, // Last 12 weeks
@@ -87,6 +127,7 @@ export async function GET() {
         topChanges: c.topChanges,
         critiqueText: c.critiqueText.substring(0, 500), // truncated for list view
         actionItems: c.actionItems,
+        suggestedChanges: (c.suggestedChanges as any) || [],
         modelUsed: c.modelUsed,
         costDIEM: c.costDIEM,
         createdAt: c.createdAt.toISOString(),
