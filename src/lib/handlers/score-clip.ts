@@ -7,6 +7,7 @@ import { prisma } from "../prisma";
 import { downloadAssetToFile, updateAssetDescription } from "../immich";
 import { computeTieredScore, TIER_FORMULAS } from "../tier-formulas";
 import { checkAndReserveBudget, isEventCircuitPaused, recordJobOutcome, refundBudget, estimateScoreClipCost } from "../cost-estimator";
+import { transcribeVideo, TranscriptionResult } from "../transcription";
 // US-014: centralized quality flag + error recording (graceful degradation, circuit breaker, user-visible messages)
 import { createLogger } from "../logger";
 import { recordQualityFlags, markPartialSuccess, recordJobError } from "./quality-tracking";
@@ -98,23 +99,84 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     const analysisDuration = needsWindow ? Math.max(0.1, winEnd - winStart) : (asset.durationSeconds || 0);
     const sport = asset.event?.sport?.toLowerCase() || "default";
 
-    // ── 2. Run STT on raw video (dual-path: Venice beta with diarization primary, Whisper fallback) ──
-    const sttResult = await transcribeVideo(analysisPath);
-    const { transcript, segments: sttSegments, words, speakerSegments, provider } = sttResult;
-
-    // Persist word-level timestamps on the Asset for downstream speech segmentation (S1-03)
-    if (words.length > 0) {
-      await prisma.asset.update({
-        where: { id: assetId },
-        data: {
-          transcriptWordsJson: words.map((w) => ({
-            word: w.word,
-            startMs: Math.round(w.start * 1000),
-            endMs: Math.round(w.end * 1000),
-          })) as any,
-        },
-      });
+    // ── 2. Run STT on raw video (dual-path: Venice beta with diarization primary, Whisper fallback)
+    // S1-03: if parent ingest already ran transcription and stored transcriptWordsJson,
+    // skip re-transcribing and reconstruct transcript from the scoped word data.
+    let sttResult: TranscriptionResult;
+    const existingWords = (asset as any).transcriptWordsJson;
+    if (existingWords && Array.isArray(existingWords) && existingWords.length > 0) {
+      const words = existingWords.map((w: any) => ({
+        word: String(w.word || ""),
+        start: Number(w.startMs ?? 0) / 1000,
+        end: Number(w.endMs ?? 0) / 1000,
+        speakerLabel: w.speakerLabel ? String(w.speakerLabel) : undefined,
+      }));
+      const transcript = words.map((w: any) => w.word).join(" ");
+      // Reconstruct segments from word gaps (>1.5s or >=12 words)
+      const segments: Array<{ start: number; end: number; text: string }> = [];
+      let cur: typeof words = [];
+      for (const w of words) {
+        if (cur.length === 0) { cur.push(w); continue; }
+        const last = cur[cur.length - 1];
+        if (w.start - last.end > 1.5 || cur.length >= 12) {
+          segments.push({
+            start: cur[0].start,
+            end: last.end,
+            text: cur.map((cw: any) => cw.word).join(" "),
+          });
+          cur = [w];
+        } else {
+          cur.push(w);
+        }
+      }
+      if (cur.length > 0) {
+        segments.push({
+          start: cur[0].start,
+          end: cur[cur.length - 1].end,
+          text: cur.map((cw: any) => cw.word).join(" "),
+        });
+      }
+      // Reconstruct speaker segments if speakerLabel present on words
+      const speakerSegs: Array<{ speakerLabel: string; start: number; end: number; text: string }> = [];
+      const groupedBySpeaker = new Map<string, typeof words>();
+      for (const w of words) {
+        const spk = w.speakerLabel || "unknown";
+        if (!groupedBySpeaker.has(spk)) groupedBySpeaker.set(spk, []);
+        groupedBySpeaker.get(spk)!.push(w);
+      }
+      for (const [label, ws] of Array.from(groupedBySpeaker.entries())) {
+        if (ws.length === 0) continue;
+        speakerSegs.push({
+          speakerLabel: label,
+          start: ws[0].start,
+          end: ws[ws.length - 1].end,
+          text: ws.map((w: any) => w.word).join(" "),
+        });
+      }
+      sttResult = {
+        transcript,
+        segments,
+        words,
+        speakerSegments: speakerSegs,
+        provider: "venice-beta",
+      };
+    } else {
+      sttResult = await transcribeVideo(analysisPath);
+      // Persist word-level timestamps on the Asset for downstream speech segmentation (S1-03)
+      if (sttResult.words.length > 0) {
+        await prisma.asset.update({
+          where: { id: assetId },
+          data: {
+            transcriptWordsJson: sttResult.words.map((w) => ({
+              word: w.word,
+              startMs: Math.round(w.start * 1000),
+              endMs: Math.round(w.end * 1000),
+            })) as any,
+          },
+        });
+      }
     }
+    const { transcript, segments: sttSegments, words, speakerSegments, provider } = sttResult;
 
     // ── 3. Compute audio/keyword score (speaker-aware) ──
     const keywords = SPORT_KEYWORDS[sport] || SPORT_KEYWORDS.default;
@@ -323,175 +385,8 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// DUAL-PATH TRANSCRIPTION (S1-02)
-// Primary: Venice /audio/transcriptions with diarization enabled
-// Fallback: Venice /audio/transcriptions (standard Whisper, no diarization)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-interface TranscriptionResult {
-  transcript: string;
-  segments: Array<{ start: number; end: number; text: string }>;
-  words: Array<{ word: string; start: number; end: number }>;
-  speakerSegments: Array<{ speakerLabel: string; start: number; end: number; text: string }>;
-  provider: "venice-beta" | "whisper-fallback";
-  fallbackReason?: string;
-}
-
-async function transcribeVideo(videoPath: string): Promise<TranscriptionResult> {
-  const audioPath = videoPath + ".wav";
-  await extractAudioToWav(videoPath, audioPath);
-
-  try {
-    // ── PRIMARY: try with diarization ──
-    const primary = await tryTranscribe(audioPath, { diarize: true });
-    if (primary.speakerSegments.length > 0) {
-      return { ...primary, provider: "venice-beta" };
-    }
-
-    // ── FALLBACK: standard Whisper without diarization ──
-    const fallback = await tryTranscribe(audioPath, { diarize: false });
-    return {
-      ...fallback,
-      provider: "whisper-fallback",
-      fallbackReason: "diarization_unavailable",
-    };
-  } finally {
-    try { await fs.unlink(audioPath); } catch { /* ignore cleanup */ }
-  }
-}
-
-async function tryTranscribe(
-  audioPath: string,
-  opts: { diarize: boolean }
-): Promise<Omit<TranscriptionResult, "provider" | "fallbackReason">> {
-  const buf = readFileSync(audioPath);
-  const form = new FormData();
-  form.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
-  form.append("model", "openai/whisper-large-v3");
-  form.append("response_format", "json");
-  form.append("timestamps", "true");
-  if (opts.diarize) {
-    form.append("diarize", "true");
-    form.append("diarize_audio", "true"); // some providers use this key
-  }
-
-  const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${VENICE_API_KEY}` },
-    body: form as any,
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`STT failed: ${res.status} ${text}`);
-  }
-
-  const data = await res.json();
-  const text = data.text || "";
-
-  // Venice nests word timestamps under response.timestamps.word
-  const rawWords = data.timestamps?.word || data.words || [];
-
-  if (!Array.isArray(rawWords) || rawWords.length === 0) {
-    return {
-      transcript: text,
-      segments: text ? [{ start: 0, end: 0, text }] : [],
-      words: [],
-      speakerSegments: [],
-    };
-  }
-
-  const words = rawWords.map((w: any) => ({
-    word: String(w.word || "").trim(),
-    start: Number(w.start ?? 0),
-    end: Number(w.end ?? 0),
-  })).filter((w: any) => w.word.length > 0);
-
-  // Group words into sentence segments
-  const segments: Array<{ start: number; end: number; text: string }> = [];
-  let currentWords: typeof words = [];
-
-  for (const w of words) {
-    if (currentWords.length === 0) { currentWords.push(w); continue; }
-    const last = currentWords[currentWords.length - 1];
-    const pause = w.start - last.end;
-    if (pause > 1.5 || currentWords.length >= 12) {
-      segments.push({
-        start: currentWords[0].start,
-        end: last.end,
-        text: currentWords.map((cw: any) => cw.word).join(" "),
-      });
-      currentWords = [w];
-    } else {
-      currentWords.push(w);
-    }
-  }
-  if (currentWords.length > 0) {
-    segments.push({
-      start: currentWords[0].start,
-      end: currentWords[currentWords.length - 1].end,
-      text: currentWords.map((cw: any) => cw.word).join(" "),
-    });
-  }
-
-  // Extract speaker segments from diarization response (if present)
-  const speakerSegments: Array<{ speakerLabel: string; start: number; end: number; text: string }> = [];
-  const rawSpeakers = data.speakers || data.segments || data.diarization || [];
-  if (Array.isArray(rawSpeakers) && rawSpeakers.length > 0) {
-    for (const s of rawSpeakers) {
-      const label = String(s.speaker || s.speaker_id || s.label || "UNKNOWN").trim();
-      const start = Number(s.start ?? s.start_time ?? 0);
-      const end = Number(s.end ?? s.end_time ?? 0);
-      const segText = String(s.text || s.transcript || "").trim();
-      if (segText) {
-        speakerSegments.push({ speakerLabel: label, start, end, text: segText });
-      }
-    }
-  }
-
-  // Coach-speaker heuristic: if no explicit diarization, infer from segments
-  if (speakerSegments.length === 0 && segments.length > 0) {
-    for (const seg of segments) {
-      const isCoach = seg.text.length > 20 && /(come on|let's|go to|move|position|defense|attack|hustle|set up|spread out)/i.test(seg.text);
-      speakerSegments.push({
-        speakerLabel: isCoach ? "coach" : "unknown",
-        start: seg.start,
-        end: seg.end,
-        text: seg.text,
-      });
-    }
-  }
-
-  return { transcript: text, segments, words, speakerSegments };
-}
-
-async function extractAudioToWav(videoPath: string, audioPath: string): Promise<void> {
-  const AUDIO_TIMEOUT_MS = 300_000; // 5 minutes
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
-      "-i", videoPath,
-      "-vn",
-      "-ar", "16000",
-      "-ac", "1",
-      "-c:a", "pcm_s16le",
-      "-y",
-      audioPath,
-    ]]);
-    let stderr = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      reject(new Error(`Audio extraction timed out after ${AUDIO_TIMEOUT_MS}ms`));
-    }, AUDIO_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => { stderr += d; });
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`Audio extraction failed: ${stderr.slice(-500)}`));
-    });
-  });
-}
+// S1-02/S1-03: transcription now lives in src/lib/transcription.ts (shared module)
+// Imported at top of file: import { transcribeVideo, TranscriptionResult } from "../transcription";
 
 // ── Audio score computation with speaker-aware weighting (S1-02) ──
 function computeAudioScore(

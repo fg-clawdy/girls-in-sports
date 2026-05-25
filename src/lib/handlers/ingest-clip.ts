@@ -12,6 +12,7 @@ import {
   addAssetsToAlbum,
 } from "../immich";
 import { recordQualityFlags, recordJobError, markPartialSuccess } from "./quality-tracking";
+import { transcribeVideo, TranscriptionResult } from "../transcription";
 
 interface IngestClipPayload {
   assetId: string;
@@ -94,9 +95,36 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
       return;
     }
 
-    // ── 4. Scene detection ──
+    // ── 3a. Transcription (S1-03): run STT on source to drive speech segmentation ──
+    let txResult: TranscriptionResult | null = null;
+    try {
+      const result = await transcribeVideo(sourcePath);
+      txResult = result;
+      // Store full transcript + word-level timestamps on parent Asset
+      await prisma.asset.update({
+        where: { id: assetId },
+        data: {
+          transcriptWordsJson: result.words.map((w) => ({
+            word: w.word,
+            startMs: Math.round(w.start * 1000),
+            endMs: Math.round(w.end * 1000),
+            speakerLabel: result.speakerSegments.find(
+              (s) => w.start >= s.start && w.end <= s.end
+            )?.speakerLabel || null,
+          })) as any,
+        },
+      });
+    } catch (txErr) {
+      console.warn("[ingest-clip] Transcription failed (continuing with scene-only segmentation):", txErr);
+    }
+
+    // ── 4. Scene detection + transcript-driven refinement ──
     if (durationSeconds > 20) {
-      const scenes = await detectScenes(sourcePath, durationSeconds);
+      const rawScenes = await detectScenes(sourcePath, durationSeconds);
+      const mergedBoundaries = txResult
+        ? mergeSegmentBoundaries(rawScenes, txResult, durationSeconds)
+        : rawScenes;
+      const scenes = mergedBoundaries;
       const event = await prisma.event.findUnique({
         where: { id: eventId },
         select: { immichAlbumId: true },
@@ -140,6 +168,17 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
           await addAssetsToAlbum(albumId, [uploadedImmichId]);
         }
 
+        // Scope transcript words to this child clip's time window
+        const segTranscriptWords = txResult
+          ? txResult.words
+              .filter((w) => w.start >= start && w.end <= end)
+              .map((w) => ({
+                word: w.word,
+                startMs: Math.round(w.start * 1000),
+                endMs: Math.round(w.end * 1000),
+              }))
+          : [];
+
         const clipAsset = await prisma.asset.create({
           data: {
             eventId,
@@ -154,6 +193,7 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
             sizeBytes: (await fs.stat(clipPath)).size,
             motionLevel,
             dominantMode,
+            transcriptWordsJson: segTranscriptWords.length > 0 ? (segTranscriptWords as any) : null,
           },
         });
 
@@ -372,4 +412,69 @@ async function cutClip(
       }
     });
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRANSCRIPT-DRIVEN SEGMENTATION (S1-03)
+// Merge ffmpeg scene cuts with STT word-level silence gaps and speaker changes
+// to produce refined clip boundaries for speech-dominant content.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface Scene { start: number; end: number; }
+
+function mergeSegmentBoundaries(
+  scenes: Scene[],
+  tx: TranscriptionResult,
+  totalDuration: number,
+): Scene[] {
+  const boundaries = new Set<number>([0, totalDuration]);
+
+  // Add all ffmpeg scene boundaries
+  for (const s of scenes) {
+    boundaries.add(s.start);
+    boundaries.add(s.end);
+  }
+
+  // Add silence-gap boundaries (gaps ≥ 0.8s between consecutive words)
+  const words = tx.words;
+  for (let i = 1; i < words.length; i++) {
+    const gap = words[i].start - words[i - 1].end;
+    if (gap >= 0.8) {
+      boundaries.add(words[i].start);
+    }
+  }
+
+  // Add speaker-change boundaries
+  const speakers = tx.speakerSegments;
+  for (let i = 1; i < speakers.length; i++) {
+    if (speakers[i].speakerLabel !== speakers[i - 1].speakerLabel) {
+      boundaries.add(speakers[i].start);
+    }
+  }
+
+  const sorted = Array.from(boundaries).sort((a, b) => a - b);
+  const merged: Scene[] = [];
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const start = sorted[i];
+    const end = sorted[i + 1];
+    const dur = end - start;
+
+    if (dur >= 4) {
+      // Keep segments ≥ 4 seconds
+      merged.push({ start, end });
+    } else if (merged.length > 0) {
+      // Merge very short segment into previous one
+      merged[merged.length - 1].end = end;
+    } else {
+      // First segment too short — skip and merge with next
+      continue;
+    }
+  }
+
+  if (merged.length === 0) {
+    return [{ start: 0, end: totalDuration }];
+  }
+
+  return merged;
 }
