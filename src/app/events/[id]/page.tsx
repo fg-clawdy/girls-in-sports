@@ -251,7 +251,7 @@ export default function EventPage() {
 
   const fetchEventData = useCallback(async () => {
     try {
-      const eventRes = await fetch(`/api/events/${eventId}`);
+      const eventRes = await fetch(`/api/events/${eventId}`, { cache: "no-store" });
       if (!eventRes.ok) throw new Error("Failed to load event");
       const eventData = await eventRes.json();
       setEvent(eventData.event);
@@ -272,7 +272,7 @@ export default function EventPage() {
 
   const fetchClips = useCallback(async () => {
     try {
-      const res = await fetch(`/api/events/${eventId}/clips`);
+      const res = await fetch(`/api/events/${eventId}/clips`, { cache: "no-store" });
       if (!res.ok) throw new Error("Failed to load clips");
       const data = await res.json();
       setClips(data.clips || []);
@@ -291,7 +291,7 @@ export default function EventPage() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch(`/api/events/${eventId}/jobs`);
+      const res = await fetch(`/api/events/${eventId}/jobs`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
       setJobs(data.jobs || []);
@@ -302,7 +302,7 @@ export default function EventPage() {
 
   const fetchCampaigns = useCallback(async () => {
     try {
-      const res = await fetch(`/api/events/${eventId}/campaigns`);
+      const res = await fetch(`/api/events/${eventId}/campaigns`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
       setCampaigns(data.campaigns || []);

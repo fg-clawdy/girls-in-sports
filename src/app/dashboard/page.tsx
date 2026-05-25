@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 interface JobItem {
   id: string;
@@ -77,6 +78,8 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
 
+  const router = useRouter();
+
   // Create Event modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createForm, setCreateForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "" });
@@ -96,7 +99,7 @@ export default function DashboardPage() {
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const res = await fetch("/api/jobs/status");
+      const res = await fetch("/api/jobs/status", { cache: "no-store" });
       if (!res.ok) throw new Error("Failed to load dashboard");
       const data = await res.json();
       setJobs(data.jobs || []);
@@ -145,9 +148,10 @@ export default function DashboardPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to create event");
+      const newEventId = data.event.id;
       setShowCreateModal(false);
       setCreateForm({ name: "", sport: "", city: "", eventDate: "", description: "" });
-      await fetchDashboard();
+      router.push(`/events/${newEventId}`);
     } catch (err: any) {
       setCreateError(err.message);
     } finally {

@@ -72,7 +72,7 @@ export default function PreviewPage() {
 
   const fetchCampaign = useCallback(async () => {
     try {
-      const res = await fetch(`/api/campaigns/${campaignId}`);
+      const res = await fetch(`/api/campaigns/${campaignId}`, { cache: "no-store" });
       if (!res.ok) throw new Error("Failed to load campaign");
       const data = await res.json();
       setCampaign(data.campaign);

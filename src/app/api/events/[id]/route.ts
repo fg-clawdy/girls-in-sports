@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 
+// Force dynamic so a brand-new event is immediately visible on hard refresh
+// of /events/[id] (prevents Next.js from serving a cached 404 or stale payload)
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET(
   _request: Request,
   { params }: { params: { id: string } }
@@ -16,7 +21,9 @@ export async function GET(
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
-    return NextResponse.json({ event });
+    const res = NextResponse.json({ event });
+    res.headers.set("Cache-Control", "no-store, max-age=0");
+    return res;
   } catch (error) {
     console.error("Get event error:", error);
     return NextResponse.json(

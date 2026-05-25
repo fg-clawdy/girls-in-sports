@@ -3,6 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { enqueueJob, JobType } from "@/lib/job-worker";
 import { estimateDirectScriptCost, checkAndReserveBudget } from "@/lib/cost-estimator";
 
+// Force dynamic so campaigns for a brand-new event appear immediately
+// after create + navigation or hard refresh.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET(
   _request: Request,
   { params }: { params: { id: string } }

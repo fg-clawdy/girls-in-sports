@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createAlbum, isImmichConfigured } from "@/lib/immich";
 
+// Force dynamic rendering so newly created events are immediately visible
+// (Next.js route handlers are statically optimized / cached by default)
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function POST(request: Request) {
   try {
     const { name, sport, city, eventDate, description } = await request.json();
@@ -36,6 +41,9 @@ export async function POST(request: Request) {
         eventDate: new Date(eventDate),
         description: description || null,
         immichAlbumId,
+        // Explicit defaults for columns added after initial empty migration
+        currentEstimatedCost: 0,
+        qualityTier: "PROFESSIONAL",
       },
     });
 

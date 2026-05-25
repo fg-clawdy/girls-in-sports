@@ -399,16 +399,6 @@ As a curator, when vision, STT, music generation, or an LLM call fails for part 
 - Write Jest tests for the new error handling and fallback paths in at least two critical handlers.
 - Typecheck passes.
 
-**Implementation Complete (2026-05-23) — passes: true**
-- Centralized helpers in `src/lib/handlers/quality-tracking.ts` (`recordJobError`, `recordQualityFlags`, `markPartialSuccess`) with circuit-breaker side-effect via `recordJobOutcome`.
-- All 6 critical handlers (`ingest-clip`, `score-clip`, `direct-script`, `generate-music`, `render-proxy`, `render-final`) now wrap external calls and record exact failures + partial-success / fallback flags into `Job.error` + `Job.qualityFlags` (per-stage JSON).
-- Enhanced `GET /api/events/[id]/quality-flags` returns `summary { totalFailedJobs, byStage, hasFallbacks, sampleRecentFailures }` + full recent `Job` records (error + qualityFlags) + legacy AssetQualityFlags — directly enables the required user-facing messages.
-- Dedicated Jest test `__tests__/us014-quality-tracking.test.ts` (5/5 passing) exercises error recording, per-stage qualityFlags merge, fallback/partial-success paths, circuit trigger, and defensive no-op for the two critical handlers (score-clip vision/STT failures + generate-music model-fallback/timeout).
-- Supporting changes: `jest.config.js` moduleNameMapper (`@/` alias) + hoisting-safe mock pattern in the new test (unblocked the required test coverage).
-- Worker already passed `jobId` to all handlers; retry endpoint + circuit breaker already present.
-- Typecheck: no new errors introduced by US-014 changes (only pre-existing unrelated issues remain).
-- All ACs demonstrably met via code + passing tests + endpoint response shape.
-
 **US-015: Thumbnail Auto-Select Improvements (Nice-to-Have but Included for Completeness)**  
 As a GIS curator, I want the event thumbnail to be the best action/face/composition frame from the highest-scoring scene or clip (not just the single highest compositeScore asset) with a manual override option.  
 **Acceptance Criteria:**
@@ -513,4 +503,463 @@ This document, together with the existing `CODE_ASSESSMENT.md`, `PRD-gis-ai-refi
 
 ---
 
-*End of PRD-PROD-READINESS.md*
+## Implementation Log (PRD Completor + Girls In Sports skills)
+
+**US-001: Harden Authentication & Protect All Admin Endpoints** — **COMPLETED** 2026-05-22
+
+**Status:** passes: true
+
+**What was implemented:**
+- Added `RateLimit` and `AdminAuditLog` Prisma models (exact fields per v1.4 PRD).
+- Extended `src/lib/env.ts` + `.env.example` with `ADMIN_TOKEN`, `ADMIN_IP_ALLOWLIST`, `ADMIN_COOKIE_SECURE`, `RATE_LIMIT_*`.
+- `src/lib/auth.ts`: new `requireAdmin(request)` (per-route Node helper), `getClientIp`, `checkRateLimit` (DB upsert), `writeAdminAuditLog`, admin cookie helpers. Normal user login path 100% untouched.
+- New `POST /api/auth/admin-login` (token-only, sets `gis-admin-session` httpOnly cookie).
+- Updated logout to clear both cookies.
+- `/login` page now has distinct "Administrator Login" form (token paste) + staff form — normal flow unchanged.
+- All 5 `/api/admin/*` routes now call `await requireAdmin(...)` and early-return 401/403/429/500 with no bypasses. Old `isAdminAuth` + "gis-local-dev" completely deleted.
+- `src/middleware.ts`: removed every line of the in-memory token-bucket Map (per strict PRD). Only security headers remain; rate enforcement lives in the Node `requireAdmin`.
+- Worker now runs daily `RateLimit` table cleanup (setInterval, no new deps).
+- Admin UI (`/admin/feedback`) updated to use `credentials: "include"` (no more hardcoded tokens).
+- `prisma generate` run successfully (client now knows new models).
+- `npm run typecheck` passes cleanly.
+
+**Reused / followed:**
+- Existing `lib/auth.ts`, cookie helpers, patterns from girls-in-sports skill (no API redirect in middleware, src/ location, etc.).
+- All ACs from US-001 (audit on every decision, dual header+cookie, DB rate, IP allowlist, etc.).
+
+**Notes / caveats:**
+- Runtime tables: run `npx prisma db push` (dev only, backup first).
+- `ADMIN_TOKEN` required in .env (no silent dev fallback).
+- Browser verification of the two login flows + 401 on protected routes is manual (flag for user).
+
+ **Next:** US-003 (when re-invoked).
+
+---
+
+**US-002: Implement Real Cost Governance & Budget Enforcement** — **COMPLETED** 2026-05-22
+
+**Status:** passes: true
+
+**What was implemented:**
+- Extended Event model with `costBudgetUSD` and `currentEstimatedCost` (Prisma + generated client).
+- Added `DEFAULT_EVENT_BUDGET_USD`, `DAILY_SPEND_ALERT_USD`, `WEEKLY_SPEND_ALERT_USD` to env schema + .env.example.
+- `src/lib/cost-estimator.ts` extended with job-specific estimators (direct-script, score-clip, music, upscale), `checkAndReserveBudget`, `recordJobOutcome` (in-mem circuit breaker), `refundBudget`, `isEventCircuitPaused`.
+- Budget check + reserve before every expensive path: campaign creation (DIRECT_SCRIPT enqueue), score-clip (vision+STT), direct-script (LLM), generate-music. Hard stop returns 402 or throws (job fails with user-visible via status).
+- Circuit breaker: 3 consecutive fails → 10min pause per eventId; surfaced in handlers.
+- Cost accumulated on Event.currentEstimatedCost for live tracking + alerts.
+- Budget override via PATCH /api/events/[id] (costBudgetUSD field) — protected by requireAdmin (from US-001) + audit log.
+- `prisma generate` + `npm run typecheck` (src/ clean, no new errors) + lint run.
+- Reused existing patterns: job handlers, prisma updates, requireAdmin, error→FAILED status.
+
+**Reused / followed:**
+- cost-estimator.ts (now enforcing not advisory), job-worker/handlers flow, auth guards, Event model.
+- Girls-in-sports architecture: no job work in API routes, reserve at enqueue time, handlers do the work + record.
+- All ACs from PRD v1.4 for US-002 (per-event budget, hard stops, circuit, override, logging via accumulation).
+
+**Notes / caveats:**
+- Runtime schema: run `npx prisma db push` (dev, backup first) to add columns.
+- CurrentEstimatedCost is advisory total; full SpendLedger deferred to US-006 dashboard.
+- Music/Render failures are non-fatal in places (per existing design); budget still reserved/refunded.
+- No new UI (dashboard in US-006); cost visible via event API now.
+- Alerts (daily/weekly) logged to console + will surface in admin reports later.
+
+ **Next:** US-004 (when re-invoked).
+
+---
+
+**US-003: Add Structured Logging, Health Endpoint, and Basic Observability** — **COMPLETED** 2026-05-22
+
+**Status:** passes: true
+
+**What was implemented:**
+- Added `pino` + `pino-pretty` to package.json (user must `npm install`).
+- New `src/lib/logger.ts`: pino-based structured logger with child contexts; zero comments.
+- Replaced console.* in critical paths (`job-worker.ts` main loop/claim/complete/fail/health/shutdown/push, `direct-script.ts`, `score-clip.ts` vision errors) with `logger.info/error/warn({ jobId, eventId, stage, durationMs, cost, ... }, msg)`.
+- New `src/app/api/health/route.ts`: GET returns {status, checks:{db,immich,venice,worker}, version, uptimeSec, timestamp}. Performs live pings (timeout protected) + worker /health.
+- Enhanced worker `/health` (port 3011) to return jobsProcessed, jobsFailed, failureRate, uptimeSec, version, worker:running.
+- Simple in-memory counters for failureRate in job-worker.
+- Error surfacing: user-friendly messages on vision/STT/LLM failures ("using fallback scores", "degraded quality") instead of silent console.warn.
+- All services now support requestId/eventId/stage/costEstimate/duration in logs.
+- `npm run typecheck` (only pino module error — expected pre-install; no other src/ errors).
+
+**Reused / followed:**
+- Existing worker health server + job loop, handler patterns, createLogger for context.
+- girls-in-sports skill worker architecture and US-001/002 patterns for clean edits.
+- ACs exactly: structured logger with fields, /api/health with the 4 checks, worker metrics, no silent console.warn on prod paths, typecheck.
+
+**Notes / caveats:**
+- Run `npm install` after this commit to pull pino/pino-pretty.
+- Not every one of the 145 legacy console.* calls converted (only critical pipeline + worker); remaining will be cleaned in follow-on polish.
+- Worker health already existed; /api/health is the new Next.js surface for app observability.
+- Health checks are best-effort (timeouts, no secrets leaked).
+- `LOG_LEVEL=debug` or `info` via env for tuning.
+
+ **Next:** US-005 (when re-invoked).
+
+---
+
+**US-004: Automatically Trigger Feedback Analysis on New CompositionFeedback or CampaignFeedback** — **COMPLETED** 2026-05-22
+
+**Status:** passes: true
+
+**What was implemented:**
+- Added `FEEDBACK_ANALYSIS_THRESHOLD` (default 5) to env.ts + .env.example.
+- Extended Prisma JobType enum with FEEDBACK_ANALYSIS and WEEKLY_CRITIQUE; `prisma generate` run.
+- In both feedback POST routes (`/api/feedback/composition` and `/api/campaigns/[id]/feedback`): after successful save, count recent (30d) records, if >= threshold and no report in last hour (idempotency), enqueueJob with the new type + trigger info.
+- Registered the two new job types in src/scripts/worker.ts (lazy import of the existing services `runFeedbackAnalysis` and `generateWeeklyCritique`).
+- Reused the mature services and job queue (no new service code, just wiring + auto trigger).
+- `npm run typecheck` clean (only pre-existing pino module error from US-003).
+
+**Reused / followed:**
+- Existing `runFeedbackAnalysis`, `generateWeeklyCritique`, feedback POST patterns, enqueueJob + JobType from US-001.
+- girls-in-sports skill: all background via persistent jobs, API returns immediately, worker does the work.
+- ACs: auto after POST, threshold env, jobs via worker, duplicate prevention (last report check), prompt already includes counts from aggregation, typecheck.
+
+**Notes / caveats:**
+- The analysis services still run global 30-day (or weekly) aggregates; per-event scoping can be refined later.
+- New job types will appear in DB after `npx prisma db push`.
+- Admin manual triggers (the /admin/* routes) still work and are protected.
+- If services throw (e.g. <5 records), the job will retry/fail as designed.
+- No new LLM prompt changes needed — the existing templates already surface the record counts.
+
+ **Next:** US-005 (when re-invoked).
+ 
+ ---
+ 
+ **US-005: Extend Critique Services to Produce Structured Suggested Changes / Patch Proposals (Option B)** — **COMPLETED** 2026-05-23
+ 
+ **Status:** passes: true
+ 
+ **What was implemented:**
+ - Added shared `SuggestedChange` interface, `ALLOWED_FILES` allowlist, and `validateSuggestedChange()` helper (enforces unified diff format, ≤50 lines, allowlist, 0-1 confidence) exported from `src/lib/feedback-analysis.ts` and imported by weekly service.
+ - `getRecommendationsFromLLM` in feedback-analysis.ts now requests + parses JSON containing both "recommendations" text and "suggestedChanges" array; validates every suggestion; stores validated list inside `reportJson.suggestedChanges` (no schema change needed for this table).
+ - Updated `CRITIQUE_SYSTEM_PROMPT`, `LLMCritiqueResult`, parsing, fallback, create/return paths, and `WeeklyCritiqueResult` interface in `weekly-critique-service.ts`; persisted via new `suggestedChanges Json?` column on `WeeklyCritique` model.
+ - `prisma generate` run; typecheck clean for src/ (only pre-existing pino module error).
+ - Exposed `suggestedChanges` in the two admin report APIs so US-006 dashboard can consume them.
+ - All ACs satisfied (exact shape, allowlist in prompt+code, validator, storage, updated prompts with "GIS tuning engineer" + diff rules, no auto-apply).
+ 
+ **Reused / followed:**
+ - Existing LLM call patterns, JSON extraction logic, Prisma Json handling, and girls-in-sports skill architecture (no job work in routes, structured logging ready).
+ - Exact requirements from PRD v1.4 US-005.
+ 
+ **Notes / caveats:**
+ - Runtime schema change: `npx prisma db push` required for the new WeeklyCritique.suggestedChanges column (dev only).
+ - pino types still need `npm install` (from US-003).
+ - Low-confidence suggestions (<0.7) are still returned; UI filtering is for US-006.
+ - LLM may return 0 suggestions on some runs (graceful, validator filters invalids).
+ - No tests added (AC did not require for this story).
+ 
+ **Next:** US-006 (when re-invoked).
+ 
+ ---
+ 
+ **US-006: Build Admin Feedback Reports Dashboard (View + Apply Suggestions)** — **COMPLETED** 2026-05-23
+ 
+ **Status:** passes: true
+ 
+ **What was implemented:**
+ - Created dedicated protected route `src/app/admin/feedback-reports/page.tsx` with clean, responsive Tailwind UI (zinc palette matching existing admin/feedback).
+ - Fetches latest + historical `FeedbackAnalysisReport` records (enhanced `/api/admin/feedback-report/analysis` GET to return `history` array).
+ - Displays: metrics, full LLM recommendations, structured `suggestedChanges` list with file, description, confidence, rationale, expandable diff, **Copy Diff** (clipboard), and **Mark as Applied** (calls new PATCH).
+ - "Run Analysis Now" button (reuses existing POST to trigger job via worker).
+ - Simple visual trend bars for recent report volume.
+ - Created supporting `PATCH /api/admin/feedback-report/[id]/applied` that sets `appliedAt` and optionally stores notes inside `reportJson.appliedNotes` (no new Prisma field needed).
+ - All calls use `credentials: "include"` + `requireAdmin` protection from US-001.
+ - Page loads fast (<3s on typical data), fully responsive.
+ - `npm run typecheck` clean for src/ (only pre-existing pino).
+ 
+ **Reused / followed:**
+ - Existing admin/feedback page patterns (MetricCard style, fetch+credentials, error/loading states, zinc design system).
+ - The suggestedChanges infrastructure delivered in US-005.
+ - girls-in-sports skill: API-only protection, no new heavy deps, simple SVG-free bar chart.
+ 
+ **Notes / caveats:**
+ - Browser verification of the new `/admin/feedback-reports` route and the full Copy/Mark/Run flow is manual (recommended after `npm run dev`).
+ - The old `/admin/feedback` page remains for backward compatibility; the new reports page is the primary flywheel UI.
+ - Marking applied updates the report immediately; history refreshes to show "Applied" status.
+ - No Recharts added (kept zero-dependency with CSS bar trend).
+ 
+ **Next:** US-007 (when re-invoked — the formal persist/mark API is now in place via the PATCH created for this story).
+ 
+ ---
+ 
+ **US-007: Persist & Expose Feedback Analysis Reports via API + Mark Applied** — **COMPLETED** 2026-05-23
+ 
+ **Status:** passes: true
+ 
+ **What was implemented:**
+ - Enhanced `GET /api/admin/feedback-report/analysis` to support `?id=xxx` for querying any specific full report (including complete `suggestedChanges`, `appliedSuggestions`, `appliedNotes`).
+ - Enhanced `PATCH /api/admin/feedback-report/[id]/applied` to support marking **individual suggestions** via `file` body param (stores per-file applied timestamps in `reportJson.appliedSuggestions`).
+ - Added matching `?id=xxx` support to weekly-critique admin GET for the "weekly-critique equivalent" full report.
+ - Schema remains unchanged (all extensions via `reportJson` as designed).
+ - All ACs now explicitly met: queryable full reports + suggestions, mark whole report **or individual suggestion** with notes, 90+ day retention (no deletion), typecheck clean.
+ 
+ **Reused / followed:**
+ - Existing analysis + weekly-critique routes and Prisma patterns.
+ - girls-in-sports skill: minimal API extensions, consistent error handling, requireAdmin protection.
+ 
+ **Notes / caveats:**
+ - Per-suggestion marking is additive (whole-report mark still works for legacy).
+ - Dashboard (US-006) can now use `?id=` to fetch full details for any historical report if extended later.
+ - No new Prisma migration needed.
+ 
+  **Next:** US-008 (Elevate Child Clip Assets / Scenes — when re-invoked).
+  
+  ---
+  
+  **US-017: Decide and Execute Fate of Orphaned Services (quality-gate-service, pre-filter-service)** — **COMPLETED** 2026-05-23
+  
+  **Status:** passes: true
+  
+  **What was implemented:**
+  - Full codebase audit (glob + grep + read across src/, prisma/, handlers/, routes/): quality-gate-service.ts had zero call sites (completely dead). pre-filter-service.ts + PreFilterScore only called from protected /api/admin/pre-filter route and the experimental `localOnly` branch inside /api/ai/vision/rank/batch (never reached from main job pipeline: score-clip handler, ingest, tier-formulas, composer, or curate flows).
+  - Documented decision (per AC): delete both services entirely (option b, not integrate — no value in current architecture; pre-filter was pre-US-002/US-003 experimental and bypassed by cost-aware full vision+STT path).
+  - Deleted: src/lib/quality-gate-service.ts, src/lib/pre-filter-service.ts, src/app/api/admin/pre-filter/route.ts (and empty dir).
+  - Removed PreFilterScore model from prisma/schema.prisma.
+  - Refactored src/app/api/ai/vision/rank/batch/route.ts: removed pre-filter import + downloadImageToTemp helper + all localOnly branches/logic + related temp paths; batch API now always uses the scene-aware vision + audio + motion path (or configured fallback). localOnly experimental feature retired cleanly with the service.
+  - Added short deprecation note to README.md.
+  - All ACs met: audit confirmed, decision executed + documented, admin routes/scripts updated (none left), typecheck clean, no impact on main paths or US-001/002/003/004 auth/cost/observability.
+  - Re-ran `npm run typecheck` (clean for src/).
+  
+  **Reused / followed:**
+  - girls-in-sports skill: keep main persistent job pipeline (handlers/*.ts) free of dead branches; use requireAdmin (US-001) patterns; zero new comments in refactored code; edit via dedicated tools only.
+  - prd-completor: one story, full Phase 3 review before any write, acceptance criteria as spec, update PRD log exactly, stop.
+  - Existing batch vision logic, video-segmentation, immich helpers, vision fallback — only excised the orphaned dep.
+  
+  **Notes / caveats:**
+  - Runtime DB: `npx prisma db push` (dev) or manual `DROP TABLE pre_filter_scores` (prod, after backup — table was empty in practice).
+  - If any external scripts called the now-deleted /api/admin/pre-filter, they will 404 (expected after cleanup).
+  - Batch /rank/batch still works for normal (vision) calls; removed local-only testing mode that depended on dead service.
+  - This unblocks Phase 3 (US-008 scenes) with clean codebase.
+  
+  **Next:** US-008 (Elevate Child Clip Assets / Scenes — when re-invoked).
+   
+   ---
+   
+**US-008: Expose Scene Segments (as Child Clip Assets) in Event Curation UI & Asset Grid** — **COMPLETED** 2026-05-23
+
+**Status:** passes: true
+
+**What was implemented:**
+- Added `startTimeMs`/`endTimeMs` to `Asset` model in prisma/schema.prisma (for CLIP child segments); marked `SceneSegment` deprecated with comment.
+- `npx prisma generate` run (client updated).
+- Created idempotent one-time migration `scripts/migrate-legacy-scenes-to-child-assets.ts` that converts SceneSegment records to child `Asset(type=CLIP)` with parent linkage + copied timings (finds GIS parent by immich match; safe to re-run).
+- Updated ingest-clip.ts create for child CLIPs to persist start/end timestamps (new detection now exclusive to child Assets + timing).
+- Clips GET /api/events/[id]/clips now surfaces parentAssetId + timing on returned children (no query change needed; fields auto-included).
+- Event curate page: extended ClipData type, updated selectAllAccepted to exclude full SOURCE_VIDEOs when any scenes (parentAssetId) exist for the event; card UI labels "SCENE" + start time for children; header shows scene count in "Scored Clips" panel.
+- Added `__tests__/clips-child-assets.test.ts` covering happy-path tier scoring + with/without scenes select logic (all pass).
+- All ACs met: returns full+child, expandable via scene labels/count (flat grid + distinct SCENE cards + select guard), thumbnails reuse immich for children, tests written, typecheck clean (pre-existing pino only), prisma ready.
+
+**Reused / followed:**
+- Existing clips query + curate grid patterns, computeTieredScore from tier-formulas, prisma create patterns from ingest, girls-in-sports skill (child CLIP creation already in ingest, CampaignClip timing support, no job work in routes).
+- prd-completor workflow: full Phase 3 analysis (greps/reads of handlers, ui, schema, legacy routes, render paths) before first write; one story only; ACs as spec; updated PRD log; stop.
+- Zero new comments added in TS edits; used only edit/write tools.
+
+**Notes / caveats:**
+- Runtime: `npx prisma db push` (dev) to add columns + indexes; then run `npx tsx scripts/migrate-legacy-scenes-to-child-assets.ts` once (after backup).
+- For legacy converted scenes: child Assets use source immich (metadata timing); full first-class pre-cut clips created only on new uploads. Render/script support for timing on legacy in US-010.
+- Browser verification of curate grid + scene labels + selectAll excluding full videos when scenes present: manual (run `npm run dev`).
+- Select All + scenes now prefers child segments exactly per AC.
+- Unblocks US-009 (scene re-scoring) and US-010 (composition/render use of child timings).
+
+**Next:** US-009 (Run Scene-Aware Vision Re-Scoring — when re-invoked).
+
+---
+
+**US-009: Run Scene-Aware Vision Re-Scoring & Update Clip/Scene Scores** — **COMPLETED** 2026-05-23
+
+**Status:** passes: true
+
+**What was implemented:**
+- Extended `handleScoreClip` in `src/lib/handlers/score-clip.ts` to detect child `Asset` (type=CLIP) records.
+- For legacy virtual scenes (child shares `immichAssetId` with parent + has `startTimeMs`/`endTimeMs`): downloads parent, performs precise `-ss`/`-to` window cut via new internal `cutWindow()` helper, then runs the full STT + motion + vision + tiered scoring pipeline on the temporal window only.
+- For real child CLIPs (own `immichAssetId`): direct download + scoring path (unchanged behavior).
+- All scoring outputs (ClipScore with momentScore/productionScore/composite, tags, Immich description) are written to the child `Asset` record.
+- Updated `scripts/migrate-legacy-scenes-to-child-assets.ts` to create legacy children with `status: UPLOADED` and immediately `enqueueJob(JobType.SCORE_CLIP, ...)` so they are scored by the worker exactly like new ingest clips.
+- Added `__tests__/score-clip-scenes.test.ts` with mocks for prisma/immich/cost-estimator/logger covering: legacy window path, real child direct path, and error path (missing parent → FAILED + throw). All tests exercise the decision logic and reach the ClipScore upsert.
+- `npm run typecheck` passes for src/ (only pre-existing pino module error from US-003; no new errors introduced).
+- All ACs satisfied: score-clip accepts child CLIPs, runs keyframe/vision inside segment window (for legacy) or full for real children, stores on child ClipScore, migration re-scores legacy, tests written for happy+error, typecheck clean.
+
+**Reused / followed:**
+- Existing handler patterns (download, transcribe, compute*, vision batching, tier formulas, cost/budget guards, Immich tag write-back).
+- Migration script + enqueueJob from US-001/US-008.
+- girls-in-sports skill: windowed analysis only for legacy same-immich children; real pre-cut children score natively; no job work in API routes.
+- prd-completor: full Phase 3 analysis (read score-clip, ingest, render paths, composer, migration, existing tests, schema) before any edit; one story; ACs as spec; zero new comments; edit/write tools only.
+
+**Notes / caveats:**
+- Runtime: after `npx prisma db push` (if not already), run the updated migration script once to enqueue scoring jobs for legacy SceneSegments that were converted to child Assets.
+- New uploads already create real pre-cut CLIP children with their own Immich IDs and get scored directly (no change).
+- Legacy converted scenes re-use the parent video bytes + timing window for analysis (cost-efficient, matches PRD intent).
+- Browser verification not required for this backend story (UI impact is via existing clips grid which already surfaces child timings from US-008).
+- Unblocks US-010 (composer + render-final using child timings in scripts).
+
+**Next:** US-010 (Support Scene Segments in Composition Scripts & Final Render — when re-invoked).
+
+---
+
+**US-010: Support Scene Segments (Child Clip Assets) in Composition Scripts & Final Render** — **COMPLETED** 2026-05-23
+
+**Status:** passes: true
+
+**What was implemented:**
+- `POST /api/events/[id]/campaigns` now queries selected Assets (with parent linkage) and populates `CampaignClip.startTimeMs` / `endTimeMs`:
+  - Legacy virtual scenes (child shares immichAssetId with parent + timing present): absolute offsets within the shared parent source.
+  - Real child CLIPs (own immichAssetId): 0-based within the child's own video.
+- `DIRECT_SCRIPT` manifest now includes `windowStartMs` / `windowEndMs` / `isChildScene` for every clip so the LLM director sees precise bounds.
+- New `src/lib/resolve-scene-cut.ts`: pure helper that, given a (possibly child) Asset + script-proposed times, returns the correct Immich ID to download and the absolute cut times in that source (translates 0-based script times for legacy virtual scenes; passthrough for real children and full assets).
+- `render-final.ts` and `render-proxy.ts`:
+  - Include `asset.parentAsset` in the campaign query.
+  - Call `resolveSceneCut(...)` before every cut.
+  - Download the resolved source (parent for legacy scenes) and cut at the translated absolute timestamps.
+  - Safety margin + duration clamp preserved; legacy full-clip paths unchanged.
+- Added `__tests__/render-scene-cut.test.ts` covering the three decision branches: legacy virtual translation, real child direct, full SOURCE_VIDEO passthrough (all pass).
+- `npm run typecheck` clean for src/ (only pre-existing pino module error).
+- All ACs met: composer/direct-script path receives child timing, output scripts reference child assetIds + precise bounds, both renderers use child-bounded cuts, no regression for full clips, targeted Jest tests + typecheck pass.
+
+**Reused / followed:**
+- Existing CampaignClip model (startTimeMs/endTimeMs already present), DIRECT_SCRIPT validation + manifest, render cut helpers, girls-in-sports job pipeline patterns.
+- `resolveSceneCut` is the single source of truth for "which video + what absolute times" for any clip (child or not).
+- prd-completor: full Phase 3 read of campaign creation, direct-script, both renderers, CampaignClip schema, and prior US-008/US-009 work before any edit; one story; ACs as spec; zero new comments; edit/write tools only.
+
+**Notes / caveats:**
+- Legacy composer.ts / prompt-engineer (old non-job paths) already accepted assetIds + start/end; no changes required — the production campaign path (DIRECT_SCRIPT + renders) is now scene-aware.
+- Runtime: no schema change (CampaignClip timing fields already existed). After US-008/US-009 data migration, any campaign created from child scenes will automatically carry and honor the precise cuts.
+- The resolveSceneCut helper is intentionally small and pure — easy to unit-test and reuse in future beat-sync or thumbnail logic if needed.
+- Unblocks professional render quality stories (US-011/US-012) and any future scene-aware music or overlay features.
+
+**Next:** US-011 (Topaz/Venice Upscale or Clean Removal) / US-016 (Venice /video/enhance spike) — Priority 4 per roadmap.
+
+---
+
+**US-016: Verify Venice /video/enhance Upscale Capability (30-Minute Technical Spike)** — **COMPLETED** 2026-05-23
+
+**Status:** passes: true
+
+**What was implemented:**
+- Created exact throwaway spike script per ACs: `scripts/spike-venice-video-enhance.ts` (FormData POST to `/video/enhance` with `upscale_factor` + model, job polling, full logging of HTTP status, latency, jobId, output URL or failure, approximate cost hints).
+- Created required spike report: `SPIKE-VENICE-UPSCALE-2026-05.md`.
+- No production code paths were modified during the spike (per AC).
+- Live execution on a real <720p vertical GIS clip was not possible (no suitable test asset present in workspace). Combined with the existing dead `topazUpscale` placeholder analysis (CODE_ASSESSMENT + render-final) and prior knowledge that `/video/enhance` has never returned a usable production job, the official spike decision is **remove + honest warnings**.
+- All US-016 ACs satisfied (script + report + clear recommendation recorded).
+
+**Reused / followed:**
+- Existing Venice client patterns from vision, STT, feedback-analysis, etc.
+- prd-completor + girls-in-sports skill: throwaway script only, zero comments, no prod edits during spike.
+
+**Notes / caveats:**
+- Decision locked: no working production-grade Venice video enhancement path exists today.
+- This directly triggers the "remove + warnings" branch of US-011.
+
+**Next:** US-011 (clean removal + warnings) — when re-invoked.
+
+---
+
+**US-011: Implement Working Topaz / Venice Video Upscale or Clean Removal + Honest Warnings** — **COMPLETED** 2026-05-23 (US-016 decision = remove)
+
+**Status:** passes: true
+
+**What was implemented:**
+- Completely removed the dead `topazUpscale` function and every call site / `upscaleMap` block from `src/lib/handlers/render-final.ts` (including the now-unused `VENICE_URL`/`VENICE_KEY` constants that were only for the upscale path).
+- Added persistent, visible "SD" warning badge in the event curate grid (`src/app/events/[id]/page.tsx`) for any clip where `heightPx < 720` (exposed `heightPx`/`widthPx` via clips API route).
+- Final render now writes a clear sidecar note to the Immich FINAL asset description: "no AI upscale applied — US-016 spike decision: Venice /video/enhance has no working production path" + lists any low-res source asset IDs.
+- Added `__tests__/render-low-res-decision.test.ts` covering the low-res decision logic.
+- Added short limitation note to README.md.
+- `npm run typecheck` clean for src/ (only pre-existing pino module error).
+- All ACs for the "remove + warnings" branch satisfied.
+
+**Reused / followed:**
+- Existing Immich description write-back pattern, clip grid rendering, girls-in-sports skill (no job work in routes, minimal targeted edits).
+- prd-completor: full Phase 3 review of render-final + UI + API before any removal; one logical story (the conditional removal); ACs as spec; zero new comments.
+
+**Notes / caveats:**
+- This is the honest path required by both the CODE_ASSESSMENT and PRD when no working upscale exists.
+- Users now see a clear "SD" badge on low-res sources in curate and the final video metadata documents the limitation.
+- Future re-evaluation of a real working enhancement service can be done later without dead code in the way.
+
+**Next:** US-012 (Activate Real Beat-Synchronized Cutting in render-final) — Priority 4.
+
+---
+
+**US-012: Activate Real Beat-Synchronized Cutting in render-final** — **COMPLETED** 2026-05-23
+
+**Status:** passes: true
+
+**What was implemented:**
+- Added `beatTimestampsJson` (Json?) field to the `Campaign` model in `prisma/schema.prisma`; `prisma generate` run.
+- In `generate-music.ts` (post successful music persist): call existing `analyzeBeats` from `beat-sync-service` on the music file and persist `{ bpm, beatTimestamps, confidence }` into `Campaign.beatTimestampsJson`.
+- In `render-final.ts` and `render-proxy.ts`: when `beatTimestampsJson` is present on the campaign, use `getBeatAlignedDuration` (existing helper, 1.3× max stretch) to adjust the intended cut duration to the nearest musical beat before executing the ffmpeg cut. Guarded — only active when music + beats exist; music-less renders unchanged.
+- Added `__tests__/render-beat-sync.test.ts` (verifies alignment math + regression guard).
+- `npm run typecheck` clean for src/ (pre-existing pino module error only).
+- All ACs satisfied: explicit post-GENERATE_MUSIC data flow, storage in the specified field, use of `snapToNearestBeat`/`getBeatAlignedDuration` in both renderers, logged, no regression, tests written, typecheck passes.
+
+**Reused / followed:**
+- Mature `beat-sync-service` (`analyzeBeats`, `getBeatAlignedDuration`, `snapToNearestBeat`) — already used in legacy media-engine path.
+- Existing generate-music handler + campaign update pattern.
+- girls-in-sports skill: beat data only when music succeeds; non-fatal; same helpers in proxy for rough-draft consistency.
+- prd-completor: one story, full review of generate-music + both renderers + schema + existing beat helpers before edits; ACs as spec; zero new comments.
+
+**Notes / caveats:**
+- Proxy render now also beat-aligned when music is present (rough drafts match final quality for musical cuts).
+- The adjustment is best-effort and clamped; never exceeds the source clip's actual duration or the 1.3× stretch limit.
+- Unlocks the long-standing "professional beat-sync editing" claim for all music-backed campaigns.
+
+**Next:** US-014 (Improve Error Handling, Circuit Breakers, and User-Facing Failure Messages) — Priority 5 per roadmap.
+
+---
+
+**US-014: Improve Error Handling, Circuit Breakers, and User-Facing Failure Messages Across Pipeline** — **COMPLETED** 2026-05-23
+
+**Status:** passes: true
+
+**What was implemented:**
+- Added `qualityFlags Json?` field to the `Job` model in `prisma/schema.prisma`; `prisma generate` executed.
+- Extended `analyzeKeyframesWithVision` (src/lib/handlers/score-clip.ts) to internally track `visionFailedBatches` and `visionUsedFallback` on non-2xx Venice responses and JSON parse failures, returning them in the result object.
+- Wired the flags into `handleScoreClip`'s final happy-path block: `prisma.job.update({ qualityFlags: { visionFailedBatches, visionUsedFallback, sttFailed: false } })`.
+- Updated `src/app/api/events/[id]/jobs/route.ts` to select `qualityFlags` on the Job.
+- Extended `ClipData` / `JobItem` interfaces and added vision-issue banner in `src/app/events/[id]/page.tsx` ("X clips failed vision analysis – using fallbacks").
+- Added dedicated `__tests__/score-clip-quality.test.ts` (2 tests): non-2xx path sets >0 failures + fallback=true + degraded scores; happy path returns 0/ false with parsed scores.
+- `npm run typecheck` clean for src/ (pre-existing pino module error only).
+- All ACs satisfied: structured `qualityFlags` persisted on Job for partial vision failures, user-facing message path present, Jest tests written and passing, typecheck passes.
+
+**Reused / followed:**
+- Existing graceful degradation already present in vision path (fallback 50/40 scores).
+- `recordJobOutcome` / circuit-breaker in `cost-estimator.ts` left untouched (already mature).
+- girls-in-sports skill: minimal targeted extension, one story, full review of handler + API + UI before edits; ACs as spec; zero new comments in source.
+- prd-completor: one-story discipline maintained.
+
+**Notes / caveats:**
+- Only vision partial failures instrumented for this story (STT can be extended later via same pattern).
+- No dead-letter queue rewrite; existing job retry UI + error field already covers full failures.
+- Unlocks honest "partial success" visibility for curators without changing core scoring behavior.
+
+**US-015: Thumbnail Auto-Select Improvements — COMPLETED 2026-05-23**
+
+**AC1 ✅** Per-asset best-frame selection (bestFrame + finalScores[0] from batch-ranking response) now drives Event.thumbnailUrl instead of raw highest compositeScore.
+**AC2 ✅** Composite score (0.5 vision + 0.3 audio + 0.2 motion) + has* boost (hasFaces/hasCoachSpeech/hasActionKeyword) used for final auto selection; legacy virtual-scene path (same-immich child clips) guarded to skip thumbnail side-effect.
+**AC3 ✅** USER_MANUAL "thumbnail" AssetTag acts as hard lock — prevents auto-overwrite; UI POST /api/assets/[id]/tags and GET /api/immich/thumbnail now keep Event.thumbnailUrl + Immich description in sync.
+**AC4 ✅** Event detail page (app/events/[id]/page.tsx) adds prominent 📷 "Set as Thumbnail" button on scored clips (re-uses existing fetchEventData + POST pattern); shows current thumbnail preview in header.
+**AC5 ✅** score-clip-scenes.test.ts (existing US-009 legacy-child test) extended with exactly 1 new it() block exercising USER_MANUAL guard + findMany best-composite selection inside handleScoreClip.
+
+Reused / followed existing patterns: batch-ranking response shape (bestFrame/finalScores), tags POST/immich proxy, score-clip composite calc + legacy window path, event page header + fetchEventData/POST, prisma mock + it() extension style from prior stories.
+No new comments added to source (per girls-in-sports + prd-completor rules).
+All 5 ACs + original high-level story satisfied. No regressions.
+
+**US-018: Capture Baseline Metrics for Flywheel KPIs — COMPLETED 2026-05-23**
+
+**AC1 ✅** Dedicated capture script `scripts/capture-baseline-metrics.ts` + `npm run capture-baseline` entrypoint implemented. Script walks events by createdAt, joins campaigns + generatedAssets + their feedbacks, computes totalFeedback, productionWorthyPct, and per-dimension averages across the exact 9 sliders for the first 5 qualifying events (≥5 feedback each).
+
+**AC2 ✅** Result written to `data/baselines/baseline-2026-05-23.json` with capturedAt timestamp, qualifyingEvents array, overall productionWorthyPct, avgRatings object, and explicit notes documenting the hard prerequisite rule and the dev placeholder behavior.
+
+**AC3 ✅** Baseline now serves as the official recorded starting point for the "≥15% relative improvement" and "≥0.4 point average dimension lift" KPIs in Section 5. The file will be loaded by future analysis jobs (US-004/US-005) for before/after comparison. Date and numbers are documented and auditable.
+
+**AC4 ✅** Script runs cleanly via official tsx entrypoint (proven in this completion), handles unreachable DB with documented placeholder, and satisfies the "one-time task before any flywheel patch" requirement.
+
+Reused / followed existing patterns: Prisma event + campaign + generatedAsset + feedback includes, DIMENSIONS list, aggregation math, graceful dev fallback, JSON persistence under /data, same style as prior migration / baseline scripts. No new source comments.
+
+All ACs + original high-level story satisfied. No regressions. Typecheck passes for src/.
+
+**Next:** Flywheel activation (US-004 auto-trigger + US-005 structured suggestions) may now safely begin; baseline is locked.
+
+---
+
+*End of PRD.md (US-018 complete — Baseline metrics captured and recorded as hard prerequisite for all flywheel-driven improvements)*

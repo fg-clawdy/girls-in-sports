@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { TIER_FORMULAS, computeTieredScore } from "@/lib/tier-formulas";
 
+// Force dynamic so that when a brand-new event is created and the user
+// immediately navigates to /events/[id], the first load (and any hard refresh)
+// sees the real data instead of a cached 404 or empty payload.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET(
   _request: Request,
   { params }: { params: { id: string } }
