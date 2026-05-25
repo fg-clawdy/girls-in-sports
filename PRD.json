@@ -47,8 +47,9 @@
         "Speech clips classified as ClipType.SPEECH",
         "Audio signal score applied at 70% for SPEECH clips (vs 30% visual)"
       ],
-      "passes": false,
-      "commit": null
+      "passes": true,
+      "commit": "df7c97a",
+      "notes": "Implemented in ingest-clip.ts: runs transcription on source video, stores full transcriptWordsJson on parent Asset. mergeSegmentBoundaries() merges ffmpeg scene cuts with STT silence gaps (≥0.8s) and speaker changes. Each child Asset gets scoped transcriptWordsJson for its time window. score-clip.ts now reads existing transcriptWordsJson from Asset and reconstructs TranscriptionResult, skipping redundant transcription API calls."
     },
     {
       "id": "S1-04",
@@ -62,8 +63,9 @@
         "Frame extraction uses ffmpeg -ss seek with absolute timestamps",
         "MAX_FRAMES_PER_CLIP configurable via env var (default: 120)"
       ],
-      "passes": false,
-      "commit": null
+      "passes": true,
+      "commit": "927f003",
+      "notes": "Replaced fixed frame counts with tiered FPS strategy: ACTION/MIXED at 3 fps, everything else at 1 fps. frameCount = min(duration × fps, MAX_FRAMES_PER_CLIP). If capped, interval = duration / frameCount for evenly-spaced coverage. batchSize increased from 3 to 6 in analyzeKeyframesWithVision. extractKeyframes now accepts interval parameter instead of computing internally."
     },
     {
       "id": "S1-05",

@@ -193,19 +193,17 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     // ── 5. Early clipType (used for type-driven frame extraction) ──
     let clipType = assignClipType(motionScore, audioScore);
 
-    // ── 6. Dynamic frame count based on clipType + analysisDuration (ACTION gets scene+midpoints, SPEECH gets 2-3 even) ──
-    let frameCount = 3;
-    if (clipType === ClipType.ACTION || clipType === ClipType.MIXED) {
-      frameCount = analysisDuration <= 10 ? 6 : 12;
-    } else if (clipType === ClipType.SPEECH) {
-      frameCount = 3;
-    } else {
-      frameCount = analysisDuration <= 10 ? 3 : analysisDuration <= 30 ? 6 : 12;
-    }
+    // ── 6. Content-aware dynamic frame sampling (S1-04) ──
+    const MAX_FRAMES_PER_CLIP = parseInt(process.env.MAX_FRAMES_PER_CLIP || "120", 10);
+    const fps = (clipType === ClipType.ACTION || clipType === ClipType.MIXED) ? 3 : 1;
+    const rawFrameCount = Math.ceil(analysisDuration * fps);
+    const frameCount = Math.min(rawFrameCount, MAX_FRAMES_PER_CLIP);
+    // If capped, reduce density proportionally with evenly-spaced coverage
+    const interval = frameCount < rawFrameCount ? analysisDuration / frameCount : 1 / fps;
 
     const framesDir = join(tmpDir, "frames");
     await fs.mkdir(framesDir, { recursive: true });
-    const framePaths = await extractKeyframes(analysisPath, framesDir, frameCount, analysisDuration);
+    const framePaths = await extractKeyframes(analysisPath, framesDir, frameCount, interval, analysisDuration);
 
     // ── 7. Vision analysis on keyframes — ONLY momentScore + productionScore (proposal A) ──
     let momentScore = 0;
@@ -479,6 +477,7 @@ async function extractKeyframes(
   videoPath: string,
   outputDir: string,
   maxFrames: number,
+  interval: number,
   duration: number
 ): Promise<string[]> {
   // 1. Detect scene changes for smarter frame selection
@@ -502,15 +501,14 @@ async function extractKeyframes(
       timestamps.push(sceneChanges[Math.floor(i * step)]);
     }
   } else {
-    // No scene changes (static/speech clip) — evenly spaced
-    const interval = duration / (maxFrames + 1);
-    for (let i = 1; i <= maxFrames; i++) {
-      timestamps.push(interval * i);
+    // No scene changes (static/speech clip) — evenly spaced using provided interval
+    for (let i = 0; i < maxFrames; i++) {
+      timestamps.push(interval * i + interval / 2);
     }
   }
 
-  // 3. Deduplicate and sort
-  timestamps = Array.from(new Set(timestamps.map((t) => Math.round(t * 100) / 100))).sort((a, b) => a - b);
+  // 3. Clamp timestamps to duration, deduplicate, and sort
+  timestamps = Array.from(new Set(timestamps.filter((t) => t < duration).map((t) => Math.round(t * 100) / 100))).sort((a, b) => a - b);
 
   // 4. Extract frames
   const paths: string[] = [];
@@ -560,8 +558,8 @@ Return ONLY a valid JSON object with these two fields:
 
 Return ONLY the JSON object, no markdown, no explanations.`;
 
-  // Read frames in batches of 3
-  const batchSize = 3;
+  // Read frames in batches of 6 (S1-04: increased from 3)
+  const batchSize = 6;
   const momentScores: number[] = [];
   const productionScores: number[] = [];
   let visionFailedBatches = 0;
