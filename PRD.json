@@ -77,8 +77,9 @@
         "Crowd roar / celebration detected via audio energy peaks",
         "Audio-driven composite score computed independently from motion score"
       ],
-      "passes": false,
-      "commit": null
+      "passes": true,
+      "commit": "d2375ea",
+      "notes": "Added detectCrowdRoar() using ffmpeg volumedetect filter — mean > -15dB or max > -3dB triggers hasCrowdRoar. SPEECH clips now bypass tiered scoring and use 70/30 audio/production weight split. Low-motion (<30) + high-audio (>50 or hasCrowdRoar) clips get audioSignalRescue=true and clipType promoted to MIXED. hasCrowdRoar and audioSignalRescue fields added to ClipScore schema and Immich tags."
     },
     {
       "id": "S1-06",

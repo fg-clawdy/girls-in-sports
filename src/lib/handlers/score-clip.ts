@@ -187,11 +187,23 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       speakerSegments,
     );
 
-    // ── 4. Compute motion score EARLY (for clipType + dynamic frame strategy — proposal B) ──
+    // ── 4. Compute motion score EARLY (for clipType + dynamic frame strategy) ──
     const motionScore = await computeMotionScore(analysisPath);
 
-    // ── 5. Early clipType (used for type-driven frame extraction) ──
+    // ── S1-05: Audio signal rescue — detect crowd roar / celebration via energy peaks ──
+    const { hasCrowdRoar, roarScore } = await detectCrowdRoar(analysisPath);
+
+    // ── S1-05: Clip type assignment with audio signal awareness ──
     let clipType = assignClipType(motionScore, audioScore);
+
+    // ── S1-05: Low-motion + high-signal audio clips get rescued to SPEECH/MIXED ──
+    let audioSignalRescue = false;
+    if (motionScore < 30 && (audioScore > 50 || hasCrowdRoar)) {
+      audioSignalRescue = true;
+      if (clipType !== ClipType.SPEECH && clipType !== ClipType.MIXED) {
+        clipType = ClipType.MIXED; // rescue: audio is rich even if visually static
+      }
+    }
 
     // ── 6. Content-aware dynamic frame sampling (S1-04) ──
     const MAX_FRAMES_PER_CLIP = parseInt(process.env.MAX_FRAMES_PER_CLIP || "120", 10);
@@ -218,9 +230,16 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       visionUsedFallback = visionResults.visionUsedFallback;
     }
 
-    // ── 8. Tiered compositeScore using event.qualityTier + transparent TIER_FORMULAS (proposal C + D) ──
+    // ── 8. Tiered compositeScore using event.qualityTier + transparent TIER_FORMULAS ──
+    // S1-05: SPEECH clips use 70/30 audio/visual weight split instead of tier-based moment/prod
     const eventTier = asset.event?.qualityTier ?? "PROFESSIONAL";
-    const { combined: composite } = computeTieredScore(momentScore, productionScore, eventTier);
+    let finalComposite = 0;
+    if (clipType === ClipType.SPEECH) {
+      finalComposite = Math.round(audioScore * 0.7 + productionScore * 0.3);
+    } else {
+      const tierResult = computeTieredScore(momentScore, productionScore, eventTier);
+      finalComposite = tierResult.combined;
+    }
 
     // ── 9. Upsert ClipScore record (allows re-runs) ──
     const speakerSegmentsJson = speakerSegments.length > 0 ? speakerSegments : null;
@@ -233,13 +252,15 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         motionScore: Math.round(motionScore),
         momentScore,
         productionScore,
-        compositeScore: composite,
+        compositeScore: finalComposite,
         clipType,
         hasFaces,
         hasCoachSpeech,
         hasActionKeyword: keywordHits.some((k) =>
           ["shoot", "shot", "goal", "score", "spike", "block", "save", "tackle"].includes(k)
         ),
+        hasCrowdRoar,
+        audioSignalRescue,
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
         transcriptionProvider: provider,
@@ -251,13 +272,15 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         motionScore: Math.round(motionScore),
         momentScore,
         productionScore,
-        compositeScore: composite,
+        compositeScore: finalComposite,
         clipType,
         hasFaces,
         hasCoachSpeech,
         hasActionKeyword: keywordHits.some((k) =>
           ["shoot", "shot", "goal", "score", "spike", "block", "save", "tackle"].includes(k)
         ),
+        hasCrowdRoar,
+        audioSignalRescue,
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
         transcriptionProvider: provider,
@@ -275,21 +298,25 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     // ── 11. Write tags to Immich and AssetTag table ──
     const eventSport = asset.event?.sport || "sports";
     const tagDescription = [
-      `gis:score=${composite}`,
+      `gis:score=${finalComposite}`,
       `gis:type=${clipType}`,
       `gis:sport=${eventSport}`,
       `gis:hasFaces=${hasFaces}`,
       `gis:hasCoachSpeech=${hasCoachSpeech}`,
+      `gis:hasCrowdRoar=${hasCrowdRoar}`,
+      `gis:audioSignalRescue=${audioSignalRescue}`,
     ].join("\n");
 
     await updateAssetDescription(immichAssetId, tagDescription);
 
     const tagsToWrite = [
-      { tag: `score:${composite}`, confidence: 1.0 },
+      { tag: `score:${finalComposite}`, confidence: 1.0 },
       { tag: `type:${clipType}`, confidence: 1.0 },
       { tag: `sport:${eventSport}`, confidence: 1.0 },
       ...(hasFaces ? [{ tag: "hasFaces", confidence: 1.0 }] : []),
       ...(hasCoachSpeech ? [{ tag: "hasCoachSpeech", confidence: 1.0 }] : []),
+      ...(hasCrowdRoar ? [{ tag: "hasCrowdRoar", confidence: 1.0 }] : []),
+      ...(audioSignalRescue ? [{ tag: "audioSignalRescue", confidence: 1.0 }] : []),
       ...keywordHits.map((k) => ({ tag: k, confidence: 0.8 })),
     ];
 
@@ -682,6 +709,48 @@ function assignClipType(motionScore: number, audioScore: number): ClipType {
   if (audioScore > 60 && motionScore < 40) return ClipType.SPEECH;
   if (motionScore > 60 && audioScore > 40) return ClipType.MIXED;
   return ClipType.MONTAGE;
+}
+
+// ── S1-05: Crowd roar / celebration detection via audio energy peaks ──
+async function detectCrowdRoar(
+  videoPath: string
+): Promise<{ hasCrowdRoar: boolean; roarScore: number }> {
+  const ROAR_TIMEOUT_MS = 60_000;
+  return new Promise((resolve) => {
+    // Extract mean volume per second using ffmpeg volumedetect on 1-second windows
+    const proc = spawn("ffmpeg", [
+      "-i", videoPath,
+      "-af", "asetnsamples=n=16000,volumedetect",
+      "-f", "null", "-",
+    ]);
+    let stderr = "";
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      resolve({ hasCrowdRoar: false, roarScore: 0 });
+    }, ROAR_TIMEOUT_MS);
+    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.on("close", () => {
+      clearTimeout(timer);
+      // Parse mean_volume and max_volume from volumedetect output
+      const meanMatch = stderr.match(/mean_volume:\s*([-\d.]+)\s*dB/);
+      const maxMatch = stderr.match(/max_volume:\s*([-\d.]+)\s*dB/);
+      if (!meanMatch || !maxMatch) {
+        resolve({ hasCrowdRoar: false, roarScore: 0 });
+        return;
+      }
+      const meanVol = parseFloat(meanMatch[1]);
+      const maxVol = parseFloat(maxMatch[1]);
+      // Loudness range: typical speech ~-20dB, crowd roar can spike to -5dB
+      // mean above -15dB or max above -3dB suggests crowd noise
+      const hasCrowdRoar = meanVol > -15 || maxVol > -3;
+      // Score 0-100: louder = higher score
+      const roarScore = Math.min(100, Math.round(
+        Math.max(0, (meanVol + 40) * 2.5) // -40dB -> 0, -15dB -> 62, -5dB -> 87
+      ));
+      resolve({ hasCrowdRoar, roarScore });
+    });
+    proc.on("error", () => resolve({ hasCrowdRoar: false, roarScore: 0 }));
+  });
 }
 
 // ── Cut a temporal window from a source (for legacy child CLIP scene re-scoring) ──

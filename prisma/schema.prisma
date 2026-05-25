@@ -75,6 +75,8 @@ model ClipScore {
   hasFaces          Boolean   @default(false)
   hasCoachSpeech    Boolean   @default(false)
   hasActionKeyword  Boolean   @default(false)
+  hasCrowdRoar      Boolean   @default(false)     // S1-05: detected via audio energy peaks
+  audioSignalRescue Boolean   @default(false)     // S1-05: low-motion clip rescued by high audio signal
   transcriptExcerpt String?
   keywordHits       Json?
   transcriptionProvider String? // "venice-beta" | "whisper-fallback" | null
