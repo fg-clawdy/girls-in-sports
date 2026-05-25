@@ -98,16 +98,31 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     const analysisDuration = needsWindow ? Math.max(0.1, winEnd - winStart) : (asset.durationSeconds || 0);
     const sport = asset.event?.sport?.toLowerCase() || "default";
 
-    // ── 2. Run STT on raw video (windowed for legacy child scenes) ──
+    // ── 2. Run STT on raw video (dual-path: Venice beta with diarization primary, Whisper fallback) ──
     const sttResult = await transcribeVideo(analysisPath);
-    const { transcript, segments: sttSegments } = sttResult;
+    const { transcript, segments: sttSegments, words, speakerSegments, provider } = sttResult;
 
-    // ── 3. Compute audio/keyword score ──
+    // Persist word-level timestamps on the Asset for downstream speech segmentation (S1-03)
+    if (words.length > 0) {
+      await prisma.asset.update({
+        where: { id: assetId },
+        data: {
+          transcriptWordsJson: words.map((w) => ({
+            word: w.word,
+            startMs: Math.round(w.start * 1000),
+            endMs: Math.round(w.end * 1000),
+          })) as any,
+        },
+      });
+    }
+
+    // ── 3. Compute audio/keyword score (speaker-aware) ──
     const keywords = SPORT_KEYWORDS[sport] || SPORT_KEYWORDS.default;
     const { audioScore, keywordHits, hasCoachSpeech } = computeAudioScore(
       transcript,
       sttSegments,
-      keywords
+      keywords,
+      speakerSegments,
     );
 
     // ── 4. Compute motion score EARLY (for clipType + dynamic frame strategy — proposal B) ──
@@ -148,6 +163,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     const { combined: composite } = computeTieredScore(momentScore, productionScore, eventTier);
 
     // ── 9. Upsert ClipScore record (allows re-runs) ──
+    const speakerSegmentsJson = speakerSegments.length > 0 ? speakerSegments : null;
     await prisma.clipScore.upsert({
       where: { assetId },
       create: {
@@ -166,6 +182,8 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         ),
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
+        transcriptionProvider: provider,
+        speakerSegmentsJson: speakerSegmentsJson as any,
       },
       update: {
         visionScore: Math.round(productionScore),
@@ -182,6 +200,8 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         ),
         transcriptExcerpt: transcript.slice(0, 200),
         keywordHits: JSON.stringify(keywordHits),
+        transcriptionProvider: provider,
+        speakerSegmentsJson: speakerSegmentsJson as any,
       },
     });
 
@@ -288,6 +308,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       visionFailedBatches,
       visionUsedFallback,
       sttFailed: false,
+      transcriptionProvider: provider,
     });
   } catch (err) {
     await recordJobError(args.jobId, err as Error, "score-clip");
@@ -302,98 +323,147 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
   }
 }
 
-// ── STT: Extract audio (WAV 16kHz mono) then send to Venice /audio/transcriptions ──
-// Uses timestamps=true for word-level granularity. Falls back gracefully if
-// Venice returns no words array (service degradation).
-async function transcribeVideo(videoPath: string): Promise<{
+// ═══════════════════════════════════════════════════════════════════════════════
+// DUAL-PATH TRANSCRIPTION (S1-02)
+// Primary: Venice /audio/transcriptions with diarization enabled
+// Fallback: Venice /audio/transcriptions (standard Whisper, no diarization)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface TranscriptionResult {
   transcript: string;
   segments: Array<{ start: number; end: number; text: string }>;
   words: Array<{ word: string; start: number; end: number }>;
-}> {
+  speakerSegments: Array<{ speakerLabel: string; start: number; end: number; text: string }>;
+  provider: "venice-beta" | "whisper-fallback";
+  fallbackReason?: string;
+}
+
+async function transcribeVideo(videoPath: string): Promise<TranscriptionResult> {
   const audioPath = videoPath + ".wav";
   await extractAudioToWav(videoPath, audioPath);
 
   try {
-    const buf = readFileSync(audioPath);
-    const form = new FormData();
-    form.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
-    form.append("model", "openai/whisper-large-v3");
-    form.append("response_format", "json");
-    // FormData values are always strings; "true" is the standard encoding
-    // for a boolean in multipart/form-data and Venice parses it correctly.
-    form.append("timestamps", "true");
-
-    const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${VENICE_API_KEY}` },
-      body: form as any,
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`STT failed: ${res.status} ${text}`);
+    // ── PRIMARY: try with diarization ──
+    const primary = await tryTranscribe(audioPath, { diarize: true });
+    if (primary.speakerSegments.length > 0) {
+      return { ...primary, provider: "venice-beta" };
     }
 
-    const data = await res.json();
-    const text = data.text || "";
+    // ── FALLBACK: standard Whisper without diarization ──
+    const fallback = await tryTranscribe(audioPath, { diarize: false });
+    return {
+      ...fallback,
+      provider: "whisper-fallback",
+      fallbackReason: "diarization_unavailable",
+    };
+  } finally {
+    try { await fs.unlink(audioPath); } catch { /* ignore cleanup */ }
+  }
+}
 
-    // Venice nests word timestamps under response.timestamps.word —
-    // NOT response.words.  Check both paths for forward-compatibility.
-    const rawWords = data.timestamps?.word || data.words || [];
+async function tryTranscribe(
+  audioPath: string,
+  opts: { diarize: boolean }
+): Promise<Omit<TranscriptionResult, "provider" | "fallbackReason">> {
+  const buf = readFileSync(audioPath);
+  const form = new FormData();
+  form.append("file", new Blob([buf], { type: "audio/wav" }), "audio.wav");
+  form.append("model", "openai/whisper-large-v3");
+  form.append("response_format", "json");
+  form.append("timestamps", "true");
+  if (opts.diarize) {
+    form.append("diarize", "true");
+    form.append("diarize_audio", "true"); // some providers use this key
+  }
 
-    if (!Array.isArray(rawWords) || rawWords.length === 0) {
-      // Service degraded — fallback to segment-less mode
-      return {
-        transcript: text,
-        segments: text ? [{ start: 0, end: 0, text }] : [],
-        words: [],
-      };
-    }
+  const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${VENICE_API_KEY}` },
+    body: form as any,
+  });
 
-    const words = rawWords.map((w: any) => ({
-      word: String(w.word || "").trim(),
-      start: Number(w.start ?? 0),
-      end: Number(w.end ?? 0),
-    })).filter((w: any) => w.word.length > 0);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`STT failed: ${res.status} ${text}`);
+  }
 
-    // Group words into segments (~8–12 words or pause > 1.5s)
-    const segments: Array<{ start: number; end: number; text: string }> = [];
-    let currentWords: typeof words = [];
+  const data = await res.json();
+  const text = data.text || "";
 
-    for (const w of words) {
-      if (currentWords.length === 0) {
-        currentWords.push(w);
-        continue;
-      }
-      const last = currentWords[currentWords.length - 1];
-      const pause = w.start - last.end;
-      if (pause > 1.5 || currentWords.length >= 12) {
-        segments.push({
-          start: currentWords[0].start,
-          end: last.end,
-          text: currentWords.map((cw: any) => cw.word).join(" "),
-        });
-        currentWords = [w];
-      } else {
-        currentWords.push(w);
-      }
-    }
-    if (currentWords.length > 0) {
+  // Venice nests word timestamps under response.timestamps.word
+  const rawWords = data.timestamps?.word || data.words || [];
+
+  if (!Array.isArray(rawWords) || rawWords.length === 0) {
+    return {
+      transcript: text,
+      segments: text ? [{ start: 0, end: 0, text }] : [],
+      words: [],
+      speakerSegments: [],
+    };
+  }
+
+  const words = rawWords.map((w: any) => ({
+    word: String(w.word || "").trim(),
+    start: Number(w.start ?? 0),
+    end: Number(w.end ?? 0),
+  })).filter((w: any) => w.word.length > 0);
+
+  // Group words into sentence segments
+  const segments: Array<{ start: number; end: number; text: string }> = [];
+  let currentWords: typeof words = [];
+
+  for (const w of words) {
+    if (currentWords.length === 0) { currentWords.push(w); continue; }
+    const last = currentWords[currentWords.length - 1];
+    const pause = w.start - last.end;
+    if (pause > 1.5 || currentWords.length >= 12) {
       segments.push({
         start: currentWords[0].start,
-        end: currentWords[currentWords.length - 1].end,
+        end: last.end,
         text: currentWords.map((cw: any) => cw.word).join(" "),
       });
-    }
-
-    return { transcript: text, segments, words };
-  } finally {
-    try {
-      await fs.unlink(audioPath);
-    } catch {
-      // ignore cleanup
+      currentWords = [w];
+    } else {
+      currentWords.push(w);
     }
   }
+  if (currentWords.length > 0) {
+    segments.push({
+      start: currentWords[0].start,
+      end: currentWords[currentWords.length - 1].end,
+      text: currentWords.map((cw: any) => cw.word).join(" "),
+    });
+  }
+
+  // Extract speaker segments from diarization response (if present)
+  const speakerSegments: Array<{ speakerLabel: string; start: number; end: number; text: string }> = [];
+  const rawSpeakers = data.speakers || data.segments || data.diarization || [];
+  if (Array.isArray(rawSpeakers) && rawSpeakers.length > 0) {
+    for (const s of rawSpeakers) {
+      const label = String(s.speaker || s.speaker_id || s.label || "UNKNOWN").trim();
+      const start = Number(s.start ?? s.start_time ?? 0);
+      const end = Number(s.end ?? s.end_time ?? 0);
+      const segText = String(s.text || s.transcript || "").trim();
+      if (segText) {
+        speakerSegments.push({ speakerLabel: label, start, end, text: segText });
+      }
+    }
+  }
+
+  // Coach-speaker heuristic: if no explicit diarization, infer from segments
+  if (speakerSegments.length === 0 && segments.length > 0) {
+    for (const seg of segments) {
+      const isCoach = seg.text.length > 20 && /(come on|let's|go to|move|position|defense|attack|hustle|set up|spread out)/i.test(seg.text);
+      speakerSegments.push({
+        speakerLabel: isCoach ? "coach" : "unknown",
+        start: seg.start,
+        end: seg.end,
+        text: seg.text,
+      });
+    }
+  }
+
+  return { transcript: text, segments, words, speakerSegments };
 }
 
 async function extractAudioToWav(videoPath: string, audioPath: string): Promise<void> {
@@ -423,11 +493,12 @@ async function extractAudioToWav(videoPath: string, audioPath: string): Promise<
   });
 }
 
-// ── Audio score computation ──
+// ── Audio score computation with speaker-aware weighting (S1-02) ──
 function computeAudioScore(
   transcript: string,
   segments: Array<{ start: number; end: number; text: string }>,
-  keywords: string[]
+  keywords: string[],
+  speakerSegments?: Array<{ speakerLabel: string; start: number; end: number; text: string }>,
 ): { audioScore: number; keywordHits: string[]; hasCoachSpeech: boolean } {
   const lower = transcript.toLowerCase();
   const hits: string[] = [];
@@ -447,7 +518,23 @@ function computeAudioScore(
   const totalDuration = segments.length > 0 ? segments[segments.length - 1].end : 1;
   const density = Math.min(totalSpeech / Math.max(totalDuration, 1), 1);
 
-  const keywordScore = Math.min(keywordCount * 8, 60);
+  // Speaker-aware keyword weighting: coach-identified segments count 2×
+  let weightedKeywordCount = keywordCount;
+  if (speakerSegments && speakerSegments.length > 0) {
+    for (const seg of speakerSegments) {
+      const segLower = seg.text.toLowerCase();
+      const isCoach = seg.speakerLabel.toLowerCase() === "coach";
+      for (const kw of keywords) {
+        const regex = new RegExp(`\\b${kw}\\b`, "gi");
+        const segMatches = segLower.match(regex);
+        if (segMatches && isCoach) {
+          weightedKeywordCount += segMatches.length; // extra +1× on top of base
+        }
+      }
+    }
+  }
+
+  const keywordScore = Math.min(weightedKeywordCount * 8, 60);
   const densityBonus = density * 25;
   const score = Math.max(0, Math.min(100, keywordScore + densityBonus));
 
