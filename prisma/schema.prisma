@@ -37,29 +37,32 @@ model Asset {
   type            AssetType
   parentAssetId   String?
   filePath        String?
-   durationSeconds Float?
-   startTimeMs     Int?
-   endTimeMs       Int?
-   widthPx         Int?
-   heightPx        Int?
-   fps             Float?
-   codec           String?
-   sizeBytes       Int?
-   status          AssetStatus    @default(UPLOADED)
-   ingestJobId     String?
-   createdAt       DateTime       @default(now())
-   assetTags       AssetTag[]
-   event           Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-   parentAsset     Asset?         @relation("AssetParent", fields: [parentAssetId], references: [id])
-   childAssets     Asset[]        @relation("AssetParent")
-   campaignClips   CampaignClip[]
-   clipScore       ClipScore?
+  durationSeconds Float?
+  startTimeMs     Int?
+  endTimeMs       Int?
+  widthPx         Int?
+  heightPx        Int?
+  fps             Float?
+  codec           String?
+  sizeBytes       Int?
+  status          AssetStatus    @default(UPLOADED)
+  ingestJobId     String?
+  motionLevel     String?        // 'LOW' | 'MEDIUM' | 'HIGH' — set during ingest segmentation
+  dominantMode    String?        // 'ACTION' | 'SPEECH' | 'MIXED' — set during ingest segmentation
+  transcriptWordsJson Json?      // Array of {word, startMs, endMs, speakerLabel?} scoped to this clip's time window
+  createdAt       DateTime       @default(now())
+  assetTags       AssetTag[]
+  event           Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  parentAsset     Asset?         @relation("AssetParent", fields: [parentAssetId], references: [id])
+  childAssets     Asset[]        @relation("AssetParent")
+  campaignClips   CampaignClip[]
+  clipScore       ClipScore?
 
-   @@index([eventId])
-   @@index([immichAssetId])
-   @@index([parentAssetId])
-   @@map("assets")
- }
+  @@index([eventId])
+  @@index([immichAssetId])
+  @@index([parentAssetId])
+  @@map("assets")
+}
 
 model ClipScore {
   id                String    @id @default(cuid())
@@ -112,6 +115,7 @@ model Campaign {
   scriptJson              Json?
   musicUrl                String?
   musicPrompt             String?
+  musicModelPreference    String?                   // S1-06: user-selectable music model (e.g. "elevenlabs-music", "ace-step", "auto")
   beatTimestampsJson      Json?                    // beat timestamps for music (for beat-sync cuts in render)
   proxyAssetId            String?
   finalAssetId            String?

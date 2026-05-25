@@ -41,6 +41,19 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
   const sourcePath = join(tmpDir, "source");
 
   try {
+    // ── 1a. Idempotency guard ──
+    const existingChildren = await prisma.asset.count({
+      where: { parentAssetId: assetId, type: "CLIP" },
+    });
+    if (existingChildren > 0) {
+      await recordQualityFlags(jobId, "ingest-clip", {
+        skipped: true,
+        reason: "child_assets_already_exist",
+        childCount: existingChildren,
+      });
+      return;
+    }
+
     // ── 2. Download from Immich ──
     await downloadAssetToFile(immichAssetId, sourcePath);
 
@@ -82,7 +95,7 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
     }
 
     // ── 4. Scene detection ──
-    if (durationSeconds > 60) {
+    if (durationSeconds > 20) {
       const scenes = await detectScenes(sourcePath, durationSeconds);
       const event = await prisma.event.findUnique({
         where: { id: eventId },
@@ -94,18 +107,23 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
         start: number;
         end: number;
         clipPath: string;
+        motionLevel: string;
+        dominantMode: string;
       }> = [];
 
       for (let i = 0; i < scenes.length; i++) {
         const { start, end } = scenes[i];
         const clipPath = join(tmpDir, `clip_${i}.mp4`);
         await cutClip(sourcePath, clipPath, start, end);
-        clipJobs.push({ start, end, clipPath });
+        const dur = end - start;
+        const motionLevel = dur < 5 ? "HIGH" : dur < 15 ? "MEDIUM" : "LOW";
+        const dominantMode = dur < 5 ? "ACTION" : dur < 20 ? "MIXED" : "SPEECH";
+        clipJobs.push({ start, end, clipPath, motionLevel, dominantMode });
       }
 
-      // ── 5. Upload clips to Immich ──
+      // ── 5. Upload clips to Immich + create child Assets ──
       for (let i = 0; i < clipJobs.length; i++) {
-        const { start, end, clipPath } = clipJobs[i];
+        const { start, end, clipPath, motionLevel, dominantMode } = clipJobs[i];
         const now = new Date().toISOString();
         const clipName = `clip_${i}_${start.toFixed(2)}-${end.toFixed(2)}.mp4`;
 
@@ -134,6 +152,8 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
             startTimeMs: Math.round(start * 1000),
             endTimeMs: Math.round(end * 1000),
             sizeBytes: (await fs.stat(clipPath)).size,
+            motionLevel,
+            dominantMode,
           },
         });
 
