@@ -107,6 +107,13 @@ const ENERGY_OPTIONS: { value: string; label: string }[] = [
   { value: "INSTRUCTIONAL", label: "Instructional" },
 ];
 
+const MUSIC_MODEL_OPTIONS: { value: string; label: string; note?: string }[] = [
+  { value: "minimax-music-v26", label: "MiniMax v26", note: "default" },
+  { value: "elevenlabs-music", label: "ElevenLabs Music", note: "expensive" },
+  { value: "minimax-music-v2", label: "MiniMax v2" },
+  { value: "minimax-music-v25", label: "MiniMax v25" },
+];
+
 const SPORT_BRIEF_EXAMPLES: Record<string, string> = {
   basketball: "Focus on fast breaks and player reactions. High intensity.",
   soccer: "Show team chemistry and goal celebrations. Emotional arc.",
@@ -222,6 +229,7 @@ export default function EventPage() {
   const [brief, setBrief] = useState("");
   const [targetFormat, setTargetFormat] = useState("");
   const [energyPreset, setEnergyPreset] = useState("HYPE");
+  const [musicModel, setMusicModel] = useState("minimax-music-v26");
   const [creating, setCreating] = useState(false);
 
   // ── Active Jobs ──
@@ -485,6 +493,7 @@ export default function EventPage() {
           brief: brief.trim(),
           targetFormat,
           energyPreset,
+          musicModel,
           selectedAssetIds: sortedClips.filter((c) => acceptedMap[c.id]).map((c) => c.id),
           mustIncludeAssetIds: mustIncludeIds,
         }),
@@ -882,6 +891,27 @@ export default function EventPage() {
                         }`}
                       >
                         {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-zinc-600 block mb-1">Music Model</label>
+                  <div className="flex flex-wrap gap-2">
+                    {MUSIC_MODEL_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setMusicModel(opt.value)}
+                        title={opt.note || ""}
+                        className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+                          musicModel === opt.value
+                            ? "bg-violet-50 text-violet-700 border-violet-300"
+                            : "bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50"
+                        }`}
+                      >
+                        {opt.label}
+                        {opt.note && <span className="ml-1 text-zinc-400">({opt.note})</span>}
                       </button>
                     ))}
                   </div>

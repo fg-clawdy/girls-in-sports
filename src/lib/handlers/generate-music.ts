@@ -68,12 +68,15 @@ export async function handleGenerateMusic({
     targetDuration
   );
 
-  // Queue music generation (try elevenlabs-music first, fallback to ACE-Step 1.5)
+  // Queue music generation using Campaign.musicModelPreference (S1-06)
+  const DEFAULT_FALLBACK_MODEL = "minimax-music-v26";
+  const preferredModel = campaign.musicModelPreference || DEFAULT_FALLBACK_MODEL;
+
   let queueId: string;
   let modelUsed: string;
   try {
     const queueResult = await queueMusicGeneration({
-      model: "elevenlabs-music",
+      model: preferredModel as any,
       prompt,
       durationSeconds: targetDuration + 3, // +3s tail fade buffer
       forceInstrumental: true,
@@ -81,10 +84,10 @@ export async function handleGenerateMusic({
     queueId = queueResult.queueId;
     modelUsed = queueResult.model;
   } catch (err1) {
-    console.warn(`[generate-music] elevenlabs-music failed, trying ACE-Step fallback:`, err1);
+    console.warn(`[generate-music] ${preferredModel} failed, trying ${DEFAULT_FALLBACK_MODEL} fallback:`, err1);
     try {
       const queueResult = await queueMusicGeneration({
-        model: "ace-step" as any,
+        model: DEFAULT_FALLBACK_MODEL as any,
         prompt,
         durationSeconds: targetDuration + 3,
         forceInstrumental: true,

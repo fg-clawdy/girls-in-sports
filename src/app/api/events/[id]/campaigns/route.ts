@@ -40,7 +40,7 @@ export async function POST(
 ) {
   try {
     const body = await request.json();
-    const { brief, targetFormat, energyPreset, selectedAssetIds, mustIncludeAssetIds } = body;
+    const { brief, targetFormat, energyPreset, selectedAssetIds, mustIncludeAssetIds, musicModel } = body;
 
     if (!targetFormat) {
       return NextResponse.json({ error: "targetFormat is required" }, { status: 400 });
@@ -48,6 +48,10 @@ export async function POST(
     if (!selectedAssetIds || selectedAssetIds.length < 3) {
       return NextResponse.json({ error: "At least 3 clips must be accepted" }, { status: 400 });
     }
+
+    // S1-06: validate music model
+    const VALID_MUSIC_MODELS = ["minimax-music-v26", "elevenlabs-music", "minimax-music-v2", "minimax-music-v25"];
+    const resolvedMusicModel = VALID_MUSIC_MODELS.includes(musicModel) ? musicModel : "minimax-music-v26";
 
     const event = await prisma.event.findUnique({
       where: { id: params.id },
@@ -96,6 +100,7 @@ export async function POST(
         brief: brief ?? null,
         selectedAssetIds: selectedAssetIds as string[],
         status: "DIRECTING",
+        musicModelPreference: resolvedMusicModel,
       },
     });
 
