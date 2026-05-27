@@ -426,8 +426,9 @@ export function startHealthServer(port = 3011) {
           jobsFailed,
           failureRate: Number(failureRate.toFixed(4)),
           uptimeSec,
-          version: "0.2.0",
-          worker: "running",
+          version: "0.2.1",
+          worker: allWorkers.length > 0 ? "running" : "not_started",
+          workerCount: allWorkers.length,
           memory: {
             heapUsedMB: Math.round(memUsage.heapUsed / 1024 / 1024),
             heapTotalMB: Math.round(memUsage.heapTotal / 1024 / 1024),

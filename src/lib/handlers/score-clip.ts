@@ -315,6 +315,17 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         const childStartMs = offsetMs + Math.round(seg.startTime * 1000);
         const childEndMs = offsetMs + Math.round(seg.endTime * 1000);
 
+        // Idempotency: skip if a child CLIP already exists for this time window
+        const exists = await prisma.asset.findFirst({
+          where: {
+            parentAssetId: assetId,
+            type: "CLIP",
+            startTimeMs: childStartMs,
+            endTimeMs: childEndMs,
+          },
+        });
+        if (exists) continue;
+
         await prisma.asset.create({
           data: {
             eventId,
@@ -343,6 +354,17 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         const offsetMs = needsWindow ? Math.round(winStart * 1000) : 0;
         const childStartMs = offsetMs + Math.round(qs.startTime * 1000);
         const childEndMs = offsetMs + Math.round(qs.endTime * 1000);
+
+        // Idempotency: skip if a child CLIP already exists for this time window
+        const exists = await prisma.asset.findFirst({
+          where: {
+            parentAssetId: assetId,
+            type: "CLIP",
+            startTimeMs: childStartMs,
+            endTimeMs: childEndMs,
+          },
+        });
+        if (exists) continue;
 
         await prisma.asset.create({
           data: {
