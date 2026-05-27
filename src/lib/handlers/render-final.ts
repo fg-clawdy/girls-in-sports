@@ -1,4 +1,3 @@
-import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import * as path from "path";
 import { prisma } from "../prisma";
@@ -347,46 +346,44 @@ async function cutSegment(
   ]);
 }
 
+import { spawnLimitedFfmpeg, spawnLimitedFfprobe, collectStdout, collectStderr } from "../ffmpeg-utils";
+
 function runFfmpeg(args: string[]): Promise<void> {
-  const RENDER_TIMEOUT_MS = 1_200_000; // 20 minutes for final renders (slower preset, higher quality)
+  const RENDER_TIMEOUT_MS = 1_200_000; // 20 minutes for final renders
 
   return new Promise((resolve, reject) => {
-    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...args], { stdio: ["ignore", "ignore", "pipe"] });
+    const { proc } = spawnLimitedFfmpeg(args, {
+      nice: 15,
+      timeoutMs: RENDER_TIMEOUT_MS,
+      logTag: "render-final",
+    });
     let stderr = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      reject(new Error(`ffmpeg timed out after ${RENDER_TIMEOUT_MS}ms`));
-    }, RENDER_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", (code) => {
-      clearTimeout(timer);
       if (code !== 0) {
         reject(new Error(`ffmpeg failed (${code}): ${stderr.slice(-800)}`));
       } else {
         resolve();
       }
     });
-    proc.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    proc.on("error", reject);
   });
 }
 
 async function probeCodec(filePath: string): Promise<string> {
-  return new Promise((resolve) => {
-    const proc = spawn("nice", ["-n", "10", "ffprobe", ...[
+  try {
+    const { proc } = spawnLimitedFfprobe([
       "-v", "error",
       "-select_streams", "v:0",
       "-show_entries", "stream=codec_name",
       "-of", "default=noprint_wrappers=1:nokey=1",
       filePath,
-    ]]);
-    let out = "";
-    proc.stdout.on("data", (d) => { out += d; });
-    proc.on("close", () => resolve(out.trim() || "unknown"));
-    proc.on("error", () => resolve("unknown"));
-  });
+    ], { logTag: "render-final:probeCodec" });
+    const out = await collectStdout(proc as { stdout: NodeJS.ReadableStream });
+    return out.trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 async function fileExists(p: string): Promise<boolean> {

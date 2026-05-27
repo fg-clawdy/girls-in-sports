@@ -1,4 +1,4 @@
-import { createWriteStream } from "fs";
+import { createWriteStream, createReadStream, statSync } from "fs";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 
@@ -180,22 +180,51 @@ export async function uploadAssetFromFile(
   fileModifiedAt: string,
   fileType: string
 ): Promise<string> {
-  const form = new FormData();
-  const { readFileSync } = await import("fs");
-  const buf = readFileSync(localPath);
-  form.append("assetData", new Blob([buf], { type: fileType }), fileName);
-  form.append("deviceAssetId", deviceAssetId);
-  form.append("deviceId", "gis-worker");
-  form.append("fileCreatedAt", fileCreatedAt);
-  form.append("fileModifiedAt", fileModifiedAt);
+  // Stream the file in 64KB chunks instead of loading entirely into RAM
+  // This is the single largest OOM culprit — readFileSync on 50-500MB clips.
+  const { size } = statSync(localPath);
+  const fileStream = createReadStream(localPath, { highWaterMark: 64 * 1024 });
+
+  // Build a streaming FormData-compatible body using a ReadableStream
+  const boundary = `----FormBoundary${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+
+  function fieldString(name: string, value: string): string {
+    return `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
+  }
+
+  const prelude = (
+    fieldString("deviceAssetId", deviceAssetId) +
+    fieldString("deviceId", "gis-worker") +
+    fieldString("fileCreatedAt", fileCreatedAt) +
+    fieldString("fileModifiedAt", fileModifiedAt) +
+    `--${boundary}\r\nContent-Disposition: form-data; name="assetData"; filename="${fileName}"\r\nContent-Type: ${fileType}\r\n\r\n`
+  );
+
+  const trailer = `\r\n--${boundary}--\r\n`;
+
+  // Create a single Readable that emits prelude, file stream, trailer
+  const combined = new Readable({
+    read() {},
+  });
+
+  combined.push(prelude);
+  fileStream.on("data", (chunk) => combined.push(chunk));
+  fileStream.on("end", () => combined.push(trailer));
+  fileStream.on("error", (err) => combined.destroy(err));
 
   const res = await fetch(`${getImmichUrl()}/api/assets`, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "x-api-key": getImmichKey(),
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      "Content-Length": String(
+        prelude.length + size + trailer.length
+      ),
     },
-    body: form as any,
+    // Node 18+ fetch requires duplex: 'half' for streaming request bodies
+    body: Readable.toWeb(combined) as any,
+    ...({ duplex: "half" } as any),
   });
 
   if (!res.ok) {

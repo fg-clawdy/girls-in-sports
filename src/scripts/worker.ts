@@ -12,6 +12,8 @@ import {
   registerHandler,
   JobType,
 } from "../lib/job-worker";
+import { closeAllQueues } from "../lib/queues";
+import { logger } from "../lib/logger";
 
 const HEALTH_PORT = parseInt(process.env.WORKER_HEALTH_PORT || "3011", 10);
 
@@ -61,9 +63,17 @@ registerHandler(JobType.WEEKLY_CRITIQUE, async ({ payload, jobId }) => {
   await generateWeeklyCritique(weekStart);
 });
 
+// ── Start ───────────────────────────────────────────────────────
+
 setupGracefulShutdown();
 startHealthServer(HEALTH_PORT);
-startWorker();
+
+// startWorker() creates BullMQ workers for each registered handler and returns.
+// The health server + BullMQ Redis connections keep the process alive.
+startWorker().catch((err) => {
+  logger.error({ stage: "worker", error: String(err) }, "Failed to start BullMQ worker");
+  process.exit(1);
+});
 
 // US-001: Daily cleanup of expired RateLimit rows (prevents table bloat; "weekly" per PRD can be daily for safety)
 setInterval(async () => {
@@ -74,9 +84,14 @@ setInterval(async () => {
       where: { resetAt: { lt: cutoff } },
     });
     if (deleted.count > 0) {
-      console.log(`[worker] Cleaned ${deleted.count} expired rate-limit buckets`);
+      logger.info({ stage: "worker", count: deleted.count }, "Cleaned expired rate-limit buckets");
     }
   } catch (e) {
-    console.error("[worker] RateLimit cleanup failed (non-fatal):", e);
+    logger.error({ stage: "worker", error: String(e) }, "RateLimit cleanup failed (non-fatal)");
   }
 }, 1000 * 60 * 60 * 24); // once per day
+
+// Cleanup BullMQ queues on process exit
+process.on("beforeExit", async () => {
+  await closeAllQueues();
+});

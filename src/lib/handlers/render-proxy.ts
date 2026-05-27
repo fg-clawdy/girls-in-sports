@@ -1,13 +1,11 @@
-import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import * as path from "path";
 import { prisma } from "../prisma";
 import { downloadAssetToFile, uploadAssetFromFile, addAssetsToAlbum } from "../immich";
-// US-014: centralized quality flag + error recording for render-proxy failures
-// (ffmpeg timeouts, Immich upload failures, script validation, etc.)
 import { resolveSceneCut } from "../resolve-scene-cut";
 import { getBeatAlignedDuration } from "../beat-sync-service";
 import { recordQualityFlags, recordJobError } from "./quality-tracking";
+import { spawnLimitedFfmpeg } from "../ffmpeg-utils";
 
 const PROXY_OUTPUT_DIR = "/tmp/gis-proxies";
 const SAFETY_MARGIN_MS = 200;
@@ -298,25 +296,21 @@ function runFfmpeg(args: string[]): Promise<void> {
   const RENDER_TIMEOUT_MS = 600_000; // 10 minutes for proxy renders
 
   return new Promise((resolve, reject) => {
-    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...args], { stdio: ["ignore", "ignore", "pipe"] });
+    const { proc } = spawnLimitedFfmpeg(args, {
+      nice: 15,
+      timeoutMs: RENDER_TIMEOUT_MS,
+      logTag: "render-proxy",
+    });
     let stderr = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      reject(new Error(`ffmpeg timed out after ${RENDER_TIMEOUT_MS}ms`));
-    }, RENDER_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", (code) => {
-      clearTimeout(timer);
       if (code !== 0) {
         reject(new Error(`ffmpeg failed (${code}): ${stderr.slice(-800)}`));
       } else {
         resolve();
       }
     });
-    proc.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    proc.on("error", reject);
   });
 }
 

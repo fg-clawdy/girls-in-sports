@@ -3,26 +3,20 @@
 // Also safely mocks child_process.spawn so real handleScoreClip (used by scenes tests) does not
 // attempt Unix-only "nice" / ffmpeg binaries on Windows or CI environments.
 
-jest.mock('./src/lib/logger', () => ({
-  createLogger: () => ({
+jest.mock('./src/lib/logger', () => {
+  const logger = {
     info: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
     debug: jest.fn(),
-    child: () => ({
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-    }),
-  }),
-  default: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-  },
-}));
+    child: () => logger,
+  };
+  return {
+    logger,
+    createLogger: () => logger,
+    default: logger,
+  };
+});
 
 // Mock child_process.spawn (used inside score-clip.ts for ffmpeg cuts + "nice" wrapper)
 // This makes any test that pulls the real handleScoreClip safe on Windows / non-Unix CI.

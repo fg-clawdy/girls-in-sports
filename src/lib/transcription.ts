@@ -55,11 +55,15 @@ async function tryTranscribe(
     form.append("diarize_audio", "true");
   }
 
+  const ac = new AbortController();
+  const sttTimeout = setTimeout(() => ac.abort(), 120_000);
   const res = await fetch(`${VENICE_API_URL}/audio/transcriptions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${VENICE_API_KEY}` },
     body: form as any,
+    signal: ac.signal,
   });
+  clearTimeout(sttTimeout);
 
   if (!res.ok) {
     const text = await res.text();

@@ -1,8 +1,8 @@
 // US-014: centralized quality flag + error recording for every external call failure
 // (Immich, ffmpeg/ffprobe, scene detection, uploads). Matches the pattern now used
 // in score-clip and required by the JobHandler contract.
-import { PrismaClient, AssetStatus } from "@prisma/client";
-import { spawn } from "child_process";
+import { AssetStatus } from "@prisma/client";
+import { spawnLimitedFfmpeg, spawnLimitedFfprobe, collectStdout, collectStderr } from "../ffmpeg-utils";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { prisma } from "../prisma";
@@ -11,8 +11,9 @@ import {
   uploadAssetFromFile,
   addAssetsToAlbum,
 } from "../immich";
-import { recordQualityFlags, recordJobError, markPartialSuccess } from "./quality-tracking";
+import { recordQualityFlags, recordJobError } from "./quality-tracking";
 import { transcribeVideo, TranscriptionResult } from "../transcription";
+import { enqueueJob, JobType } from "../job-worker";
 
 interface IngestClipPayload {
   assetId: string;
@@ -149,9 +150,13 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
         clipJobs.push({ start, end, clipPath, motionLevel, dominantMode });
       }
 
-      // ── 5. Upload clips to Immich + create child Assets ──
-      for (let i = 0; i < clipJobs.length; i++) {
-        const { start, end, clipPath, motionLevel, dominantMode } = clipJobs[i];
+      // ── 5. Upload clips to Immich + create child Assets (parallel, concurrency 3) ──
+      // Immich uploads are I/O-bound (streaming to host01 SSD over network).
+      // Parallel uploads with concurrency 3 cut total upload time for multi-clip
+      // ingests from N × T to ~ceil(N/3) × T without memory pressure.
+      const UPLOAD_CONCURRENCY = 3;
+      await poolMap(clipJobs, UPLOAD_CONCURRENCY, async (clipJob, i) => {
+        const { start, end, clipPath, motionLevel, dominantMode } = clipJob;
         const now = new Date().toISOString();
         const clipName = `clip_${i}_${start.toFixed(2)}-${end.toFixed(2)}.mp4`;
 
@@ -197,38 +202,20 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
           },
         });
 
-        await prisma.job.create({
-          data: {
-            type: "SCORE_CLIP",
-            payload: {
-              assetId: clipAsset.id,
-              immichAssetId: uploadedImmichId,
-              eventId,
-              eventName: pl.eventName,
-              parentJobId: null,
-            },
-            status: "QUEUED",
-            attempts: 0,
-            maxAttempts: 3,
-          },
+        await enqueueJob(JobType.SCORE_CLIP, {
+          assetId: clipAsset.id,
+          immichAssetId: uploadedImmichId,
+          eventId,
+          eventName: pl.eventName,
         });
-      }
+      });
     } else {
       // ── Short video: score directly ──
-      await prisma.job.create({
-        data: {
-          type: "SCORE_CLIP",
-          payload: {
-            assetId,
-            immichAssetId,
-            eventId,
-            eventName: pl.eventName,
-            parentJobId: null,
-          },
-          status: "QUEUED",
-          attempts: 0,
-          maxAttempts: 3,
-        },
+      await enqueueJob(JobType.SCORE_CLIP, {
+        assetId,
+        immichAssetId,
+        eventId,
+        eventName: pl.eventName,
       });
     }
 
@@ -251,55 +238,40 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
 }
 
 // ── ffprobe helper ──
-async function ffprobe(path: string): Promise<{
+async function ffprobe(filePath: string): Promise<{
   duration: number;
   width: number;
   height: number;
   fps: number;
   codec: string;
 }> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("nice", ["-n", "10", "ffprobe", ...[
-      "-v", "error",
-      "-select_streams", "v:0",
-      "-show_entries", "stream=width,height,r_frame_rate,codec_name",
-      "-show_entries", "format=duration",
-      "-of", "json",
-      path,
-    ]]);
+  const { proc } = spawnLimitedFfprobe([
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height,r_frame_rate,codec_name",
+    "-show_entries", "format=duration",
+    "-of", "json",
+    filePath,
+  ], { logTag: "ingest-clip:ffprobe" });
 
-    let stdout = "";
-    let stderr = "";
-    proc.stdout.on("data", (d) => { stdout += d; });
-    proc.stderr.on("data", (d) => { stderr += d; });
-    proc.on("close", (code) => {
-      if (code !== 0) {
-        return reject(new Error(`ffprobe failed: ${stderr}`));
-      }
-      try {
-        const data = JSON.parse(stdout);
-        const stream = data.streams?.[0] || {};
-        const fmt = data.format || {};
+  const outStr = await collectStdout(proc as { stdout: NodeJS.ReadableStream });
+  const data = JSON.parse(outStr);
+  const stream = data.streams?.[0] || {};
+  const fmt = data.format || {};
 
-        // Parse fps fraction like "30000/1001"
-        let fps = 0;
-        if (stream.r_frame_rate) {
-          const [num, den] = stream.r_frame_rate.split("/").map(Number);
-          if (den) fps = num / den;
-        }
+  let fps = 0;
+  if (stream.r_frame_rate) {
+    const [num, den] = stream.r_frame_rate.split("/").map(Number);
+    if (den) fps = num / den;
+  }
 
-        resolve({
-          duration: parseFloat(fmt.duration || "0"),
-          width: stream.width || 0,
-          height: stream.height || 0,
-          fps: Math.round(fps * 100) / 100,
-          codec: stream.codec_name || "",
-        });
-      } catch (e) {
-        reject(e);
-      }
-    });
-  });
+  return {
+    duration: parseFloat(fmt.duration || "0"),
+    width: stream.width || 0,
+    height: stream.height || 0,
+    fps: Math.round(fps * 100) / 100,
+    codec: stream.codec_name || "",
+  };
 }
 
 // ── Scene detection ──
@@ -309,26 +281,21 @@ async function detectScenes(
 ): Promise<Array<{ start: number; end: number }>> {
   const SCENE_TIMEOUT_MS = 600_000; // 10 minutes
 
-  const sceneCmd = spawn("nice", ["-n", "10", "ffmpeg", ...[
+  const { proc: sceneCmd } = spawnLimitedFfmpeg([
     "-i", videoPath,
     "-vf", `select='gt(scene,${SCENE_THRESHOLD})',showinfo`,
     "-an",
     "-f", "null",
     "-",
-  ]]);
+  ], { nice: 15, timeoutMs: SCENE_TIMEOUT_MS, logTag: "ingest-clip:detectScenes" });
 
-  let sceneOutput = "";
-  const timer = setTimeout(() => {
-    sceneCmd.kill("SIGTERM");
-  }, SCENE_TIMEOUT_MS);
-  sceneCmd.stderr.on("data", (d) => { sceneOutput += d; });
-
+  const sceneOutput = await collectStderr(sceneCmd);
   await new Promise<void>((resolve, reject) => {
     sceneCmd.on("close", (code) => {
-      clearTimeout(timer);
       if (code !== 0) reject(new Error(`Scene detection failed: ${sceneOutput.slice(-500)}`));
       else resolve();
     });
+    sceneCmd.on("error", reject);
   });
 
   const timestamps: number[] = [0];
@@ -387,30 +354,26 @@ async function cutClip(
 ): Promise<void> {
   const CUT_TIMEOUT_MS = 120_000; // 2 minutes
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
-      "-ss", start.toFixed(3),
-      "-to", end.toFixed(3),
-      "-i", sourcePath,
-      "-c", "copy",
-      "-y",
-      outputPath,
-    ]]);
+  const { proc } = spawnLimitedFfmpeg([
+    "-ss", start.toFixed(3),
+    "-to", end.toFixed(3),
+    "-i", sourcePath,
+    "-c", "copy",
+    "-y",
+    outputPath,
+  ], { nice: 15, timeoutMs: CUT_TIMEOUT_MS, logTag: "ingest-clip:cutClip" });
 
+  return new Promise((resolve, reject) => {
     let stderr = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      reject(new Error(`ffmpeg cut timed out after ${CUT_TIMEOUT_MS}ms`));
-    }, CUT_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", (code) => {
-      clearTimeout(timer);
       if (code !== 0) {
         reject(new Error(`ffmpeg cut failed: ${stderr.slice(-500)}`));
       } else {
         resolve();
       }
     });
+    proc.on("error", reject);
   });
 }
 
@@ -477,4 +440,30 @@ function mergeSegmentBoundaries(
   }
 
   return merged;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONCURRENCY UTILITY
+// poolMap runs an async function over an array with bounded concurrency.
+// Used for parallel Immich uploads — I/O-bound, no memory pressure from streams.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function poolMap<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let idx = 0;
+
+  async function worker(): Promise<void> {
+    while (idx < items.length) {
+      const currentIdx = idx++;
+      results[currentIdx] = await fn(items[currentIdx], currentIdx);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }

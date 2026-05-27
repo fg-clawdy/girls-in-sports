@@ -6,7 +6,7 @@
 // Phase 4: Multi-segment extraction with variable durations
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { spawn } from "child_process";
+import { spawnLimitedFfmpeg, spawnLimitedFfprobe } from "./ffmpeg-utils";
 import { mkdtemp, readFile, unlink, rmdir } from "fs/promises";
 import * as pathModule from "path";
 import * as osModule from "os";
@@ -75,16 +75,16 @@ export async function detectScenes(
     let lastSceneEnd = 0;
     let lastPts = 0;
 
-    const ffmpeg = spawn("ffmpeg", [
+    const { proc: ffmpeg } = spawnLimitedFfmpeg([
       "-i", videoPath,
       "-filter:v", `select='gt(scene,${threshold})',showinfo`,
       "-f", "null",
       "-",
-    ]);
+    ], { nice: 15, timeoutMs: 300_000, logTag: "video-seg:detectScenes" });
 
     let stderrBuffer = "";
 
-    ffmpeg.stderr.on("data", (data: Buffer) => {
+    ffmpeg.stderr?.on("data", (data: Buffer) => {
       stderrBuffer += data.toString();
     });
 
@@ -159,16 +159,16 @@ export async function detectScenes(
 }
 
 async function getVideoDuration(videoPath: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const ffprobe = spawn("ffprobe", [
+  return new Promise((resolve) => {
+    const { proc: ffprobe } = spawnLimitedFfprobe([
       "-v", "error",
       "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1",
       videoPath,
-    ]);
+    ], { logTag: "video-seg:getDuration" });
 
     let output = "";
-    ffprobe.stdout.on("data", (data: Buffer) => {
+    ffprobe.stdout?.on("data", (data: Buffer) => {
       output += data.toString();
     });
 
@@ -223,14 +223,14 @@ export async function extractFramesAtTimestamps(
     const outPath = path.join(tmpDir, `frame_${i}_${ts.toFixed(2)}.jpg`);
 
     await new Promise<void>((resolve, reject) => {
-      const ffmpeg = spawn("ffmpeg", [
+      const { proc: ffmpeg } = spawnLimitedFfmpeg([
         "-ss", ts.toFixed(3),
         "-i", videoPath,
         "-vframes", "1",
         "-q:v", "2", // high quality
         "-y",
         outPath,
-      ]);
+      ], { nice: 15, timeoutMs: 30_000, logTag: "video-seg:extractFrames" });
 
       ffmpeg.on("close", (code: number | null) => {
         if (code === 0) resolve();

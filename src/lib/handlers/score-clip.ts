@@ -1,5 +1,5 @@
 import { PrismaClient, AssetStatus, AssetTagSource, ClipType } from "@prisma/client";
-import { spawn } from "child_process";
+import { spawnLimitedFfmpeg, spawnLimitedFfprobe } from "../ffmpeg-utils";
 import { promises as fs, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { join } from "path";
@@ -470,20 +470,16 @@ function computeAudioScore(
 async function detectSceneChanges(videoPath: string): Promise<number[]> {
   const SCENE_TIMEOUT_MS = 300_000; // 5 minutes
 
+  const { proc } = spawnLimitedFfmpeg([
+    "-i", videoPath,
+    "-vf", "select='gt(scene,0.2)',showinfo",
+    "-an", "-f", "null", "-",
+  ], { nice: 15, timeoutMs: SCENE_TIMEOUT_MS, logTag: "score-clip:detectSceneChanges" });
+
   return new Promise((resolve) => {
-    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
-      "-i", videoPath,
-      "-vf", "select='gt(scene,0.2)',showinfo",
-      "-an", "-f", "null", "-",
-    ]]);
     let stderr = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      resolve([]);
-    }, SCENE_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", () => {
-      clearTimeout(timer);
       const timestamps: number[] = [];
       const regex = /pts_time:\s*([\d.]+)/g;
       let m: RegExpExecArray | null;
@@ -493,10 +489,7 @@ async function detectSceneChanges(videoPath: string): Promise<number[]> {
       }
       resolve(timestamps);
     });
-    proc.on("error", () => {
-      clearTimeout(timer);
-      resolve([]);
-    });
+    proc.on("error", () => resolve([]));
   });
 }
 
@@ -543,24 +536,20 @@ async function extractKeyframes(
     const time = timestamps[i];
     const outPath = join(outputDir, `frame_${i}.jpg`);
     const FRAME_TIMEOUT_MS = 60_000; // 1 minute per frame
+    const { proc } = spawnLimitedFfmpeg([
+      "-ss", time.toFixed(3),
+      "-i", videoPath,
+      "-frames:v", "1",
+      "-q:v", "2",
+      "-y",
+      outPath,
+    ], { nice: 15, timeoutMs: FRAME_TIMEOUT_MS, logTag: "score-clip:extractKeyframes" });
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
-        "-ss", time.toFixed(3),
-        "-i", videoPath,
-        "-frames:v", "1",
-        "-q:v", "2",
-        "-y",
-        outPath,
-      ]]);
-      const timer = setTimeout(() => {
-        proc.kill("SIGTERM");
-        reject(new Error(`Keyframe extraction timed out at ${time}s`));
-      }, FRAME_TIMEOUT_MS);
       proc.on("close", (code) => {
-        clearTimeout(timer);
         if (code === 0) resolve();
         else reject(new Error(`Keyframe extraction failed at ${time}s`));
       });
+      proc.on("error", reject);
     });
     paths.push(outPath);
   }
@@ -606,6 +595,8 @@ Return ONLY the JSON object, no markdown, no explanations.`;
       content.push({ type: "image_url", image_url: { url: img } });
     }
 
+    const ac = new AbortController();
+    const visionTimeout = setTimeout(() => ac.abort(), 120_000);
     const res = await fetch(`${VENICE_API_URL}/chat/completions`, {
       method: "POST",
       headers: {
@@ -621,7 +612,9 @@ Return ONLY the JSON object, no markdown, no explanations.`;
         max_tokens: 300,
         temperature: 0.2,
       }),
+      signal: ac.signal,
     });
+    clearTimeout(visionTimeout);
 
     if (!res.ok) {
       visionFailedBatches++;
@@ -664,15 +657,16 @@ Return ONLY the JSON object, no markdown, no explanations.`;
 
 // ── Motion score via ffmpeg scene density ──
 async function computeMotionScore(videoPath: string): Promise<number> {
-  return new Promise((resolve) => {
-    const proc = spawn("ffmpeg", [
-      "-i", videoPath,
-      "-vf", "select='gt(scene,0.05)',showinfo",
-      "-an", "-f", "null", "-",
-    ]);
+  const MOTION_TIMEOUT_MS = 120_000;
+  const { proc } = spawnLimitedFfmpeg([
+    "-i", videoPath,
+    "-vf", "select='gt(scene,0.05)',showinfo",
+    "-an", "-f", "null", "-",
+  ], { nice: 15, timeoutMs: MOTION_TIMEOUT_MS, logTag: "score-clip:computeMotionScore" });
 
+  return new Promise((resolve) => {
     let stderr = "";
-    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", () => {
       const timestamps: number[] = [];
       const regex = /pts_time:\s*([\d.]+)/g;
@@ -683,14 +677,14 @@ async function computeMotionScore(videoPath: string): Promise<number> {
       }
 
       // Get duration for normalization
-      const durProc = spawn("ffprobe", [
+      const { proc: durProc } = spawnLimitedFfprobe([
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         videoPath,
-      ]);
+      ], { logTag: "score-clip:computeMotionScore:ffprobe" });
       let durOut = "";
-      durProc.stdout.on("data", (d) => { durOut += d; });
+      durProc.stdout?.on("data", (d: Buffer) => { durOut += d.toString(); });
       durProc.on("close", () => {
         const duration = parseFloat(durOut.trim()) || 1;
         const changesPerSecond = timestamps.length / duration;
@@ -718,19 +712,14 @@ async function detectCrowdRoar(
   const ROAR_TIMEOUT_MS = 60_000;
   return new Promise((resolve) => {
     // Extract mean volume per second using ffmpeg volumedetect on 1-second windows
-    const proc = spawn("ffmpeg", [
+    const { proc } = spawnLimitedFfmpeg([
       "-i", videoPath,
       "-af", "asetnsamples=n=16000,volumedetect",
       "-f", "null", "-",
-    ]);
+    ], { nice: 15, timeoutMs: ROAR_TIMEOUT_MS, logTag: "score-clip:detectCrowdRoar" });
     let stderr = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      resolve({ hasCrowdRoar: false, roarScore: 0 });
-    }, ROAR_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", () => {
-      clearTimeout(timer);
       // Parse mean_volume and max_volume from volumedetect output
       const meanMatch = stderr.match(/mean_volume:\s*([-\d.]+)\s*dB/);
       const maxMatch = stderr.match(/max_volume:\s*([-\d.]+)\s*dB/);
@@ -761,28 +750,25 @@ async function cutWindow(
   end: number
 ): Promise<void> {
   const CUT_TIMEOUT_MS = 120_000;
+  const { proc } = spawnLimitedFfmpeg([
+    "-ss", start.toFixed(3),
+    "-to", end.toFixed(3),
+    "-i", sourcePath,
+    "-c", "copy",
+    "-y",
+    outputPath,
+  ], { nice: 15, timeoutMs: CUT_TIMEOUT_MS, logTag: "score-clip:cutWindow" });
+
   return new Promise((resolve, reject) => {
-    const proc = spawn("nice", ["-n", "10", "ffmpeg", ...[
-      "-ss", start.toFixed(3),
-      "-to", end.toFixed(3),
-      "-i", sourcePath,
-      "-c", "copy",
-      "-y",
-      outputPath,
-    ]]);
     let stderr = "";
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      reject(new Error(`ffmpeg window cut timed out after ${CUT_TIMEOUT_MS}ms`));
-    }, CUT_TIMEOUT_MS);
-    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", (code) => {
-      clearTimeout(timer);
       if (code !== 0) {
         reject(new Error(`ffmpeg window cut failed: ${stderr.slice(-500)}`));
       } else {
         resolve();
       }
     });
+    proc.on("error", reject);
   });
 }

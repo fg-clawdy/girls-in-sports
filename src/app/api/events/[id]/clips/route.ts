@@ -21,12 +21,6 @@ export async function GET(
     }
 
     const tier = event.qualityTier ?? "PROFESSIONAL";
-    const tierThreshold: Record<string, number> = {
-      AMATEUR: 0,
-      INTERMEDIATE: 25,
-      PROFESSIONAL: 50,
-    };
-    const threshold = tierThreshold[tier] ?? 50;
 
     const clips = await prisma.asset.findMany({
       where: {
@@ -67,9 +61,10 @@ export async function GET(
       };
     });
 
-    // Filter by threshold, sort by tieredScore desc
+    // Filter by tieredPasses (which already enforces per-tier moment/production minimums),
+    // sort by tieredScore desc
     const filtered = enrichedClips
-      .filter((c) => c.tieredScore >= threshold)
+      .filter((c) => c.tieredPasses)
       .sort((a, b) => b.tieredScore - a.tieredScore);
 
     return NextResponse.json({ event, clips: filtered, tier, formulas: TIER_FORMULAS });
