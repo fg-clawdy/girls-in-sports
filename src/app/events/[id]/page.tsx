@@ -1022,6 +1022,25 @@ export default function EventPage() {
                                SD
                              </span>
                            )}
+                           {/* Below-tier warning */}
+                           {clip.tieredPasses === false && (
+                             <div className="absolute bottom-2 left-2 group/tooltip">
+                               <span className="bg-red-500 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded cursor-help">
+                                 BELOW TIER
+                               </span>
+                               <div className="absolute bottom-full left-0 mb-1 w-56 hidden group-hover/tooltip:block z-50">
+                                 <div className="bg-zinc-900 text-white text-xs rounded-md px-3 py-2 shadow-lg">
+                                   <p className="font-semibold mb-1">Below {event?.qualityTier ?? "PROFESSIONAL"} tier thresholds</p>
+                                   <p className="mb-1">
+                                     Moment: {(clip.clipScore?.momentScore ?? 0).toFixed(0)} · Production: {(clip.clipScore?.productionScore ?? 0).toFixed(0)}
+                                   </p>
+                                   <p className="text-zinc-300">
+                                     You can <strong>accept this clip anyway</strong> by clicking Accept, or <strong>lower the Quality Tier</strong> in the sidebar to adjust thresholds.
+                                   </p>
+                                 </div>
+                               </div>
+                             </div>
+                           )}
                         </div>
 
                         {/* Info */}

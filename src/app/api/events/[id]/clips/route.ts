@@ -61,13 +61,12 @@ export async function GET(
       };
     });
 
-    // Filter by tieredPasses (which already enforces per-tier moment/production minimums),
-    // sort by tieredScore desc
-    const filtered = enrichedClips
-      .filter((c) => c.tieredPasses)
-      .sort((a, b) => b.tieredScore - a.tieredScore);
+    // Sort all clips by tieredScore desc. We no longer filter out below-threshold
+    // clips on the server; the UI shows them with a warning and lets the user
+    // decide whether to accept them anyway or adjust the quality tier.
+    const sorted = enrichedClips.sort((a, b) => b.tieredScore - a.tieredScore);
 
-    return NextResponse.json({ event, clips: filtered, tier, formulas: TIER_FORMULAS });
+    return NextResponse.json({ event, clips: sorted, tier, formulas: TIER_FORMULAS });
   } catch (error) {
     console.error("GET /events/[id]/clips error:", error);
     return NextResponse.json(
