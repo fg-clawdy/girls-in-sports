@@ -8,6 +8,9 @@ const PRICING = {
   sttPerMinute: 0.005,
   musicGen: 0.10,
   upscalePerClip: 0.08,
+  // S1-06: AI interestingness pricing
+  interestingnessPerWindowFrames: 3,    // frames per window (3 vision images per window)
+  quoteQualityPerCall: 0.002,          // ~0.002 DIEM per quote analysis (text LLM call)
 };
 
 function estimateTokens(text: string): number {
@@ -89,6 +92,13 @@ export function estimateScoreClipCost(hasVision: boolean, hasSTT: boolean, durat
   let d = 0;
   if (hasVision) d += 3 * PRICING.visionPerImage;
   if (hasSTT) d += Math.max(0.001, (durationSec / 60) * PRICING.sttPerMinute);
+  // S1-06: Add AI interestingness estimation
+  const numWindows = Math.min(40, Math.ceil(durationSec / 8));
+  if (hasVision && numWindows > 0) {
+    d += numWindows * PRICING.interestingnessPerWindowFrames * PRICING.visionPerImage;
+  }
+  // Quote quality (text LLM call) — only if transcript exists
+  d += PRICING.quoteQualityPerCall;
   return { textTokens: 0, visionFrames: hasVision ? 3 : 0, estimatedDIEM: parseFloat(d.toFixed(6)) };
 }
 
@@ -98,6 +108,21 @@ export function estimateMusicGenCost(): CostEstimate {
 
 export function estimateUpscaleCost(): CostEstimate {
   return { textTokens: 0, visionFrames: 0, estimatedDIEM: PRICING.upscalePerClip };
+}
+
+/**
+ * S1-06: Estimate cost specifically for temporal interestingness analysis.
+ * Used for standalone pricing when interestingness is run independently.
+ */
+export function estimateInterestingnessCost(durationSec: number): CostEstimate {
+  const numWindows = Math.min(40, Math.max(1, Math.ceil(durationSec / 8)));
+  const visionFrames = numWindows * PRICING.interestingnessPerWindowFrames;
+  const d = visionFrames * PRICING.visionPerImage + PRICING.quoteQualityPerCall;
+  return {
+    textTokens: 0,
+    visionFrames,
+    estimatedDIEM: parseFloat(d.toFixed(6)),
+  };
 }
 
 const circuitBreakers = new Map<string, { fails: number; pausedUntil: number }>();

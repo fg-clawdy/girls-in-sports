@@ -23,6 +23,18 @@ function getPrisma(): PrismaClient {
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const STALE_RUNNING_MINUTES = 30;
 
+const JOB_TIMEOUTS: Partial<Record<JobType, number>> = {
+  [JobType.INGEST_CLIP]: 10 * 60 * 1000,
+  [JobType.SCORE_CLIP]: 5 * 60 * 1000,
+  [JobType.RENDER_PROXY]: 15 * 60 * 1000,
+  [JobType.RENDER_FINAL]: 30 * 60 * 1000,
+  [JobType.DIRECT_SCRIPT]: 5 * 60 * 1000,
+  [JobType.GENERATE_MUSIC]: 10 * 60 * 1000,
+  [JobType.FEEDBACK_ANALYSIS]: 5 * 60 * 1000,
+  [JobType.WEEKLY_CRITIQUE]: 5 * 60 * 1000,
+};
+const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+
 export type JobHandler = (args: { payload: unknown; jobId: string }) => Promise<void>;
 
 const handlers = new Map<JobType, JobHandler>();
@@ -49,7 +61,24 @@ async function reclaimStaleJobs() {
     for (const job of result) {
       try {
         const queue = getQueue(job.type as JobType);
-        await queue.add(job.type, { dbJobId: job.id, payload: job.payload }, { jobId: job.id });
+        // Race guard: skip if BullMQ already has this job (active/waiting/delayed).
+        // This prevents double-processing when a job is mid-retry or was
+        // already reclaimed by another periodic tick.
+        const existing = await queue.getJob(job.id);
+        if (existing && (await existing.isActive() || await existing.isWaiting() || await existing.isDelayed())) {
+          logger.info({ jobId: job.id }, 'Reclaimed job already exists in BullMQ — skipping re-enqueue');
+          continue;
+        }
+        // Validate payload before re-enqueuing.  Payloads from raw SQL rows
+        // can be string-encoded, null, or missing critical fields.
+        let validatedPayload = job.payload;
+        if (typeof validatedPayload === "string") {
+          try { validatedPayload = JSON.parse(validatedPayload); } catch { validatedPayload = {}; }
+        }
+        if (!validatedPayload || typeof validatedPayload !== "object") {
+          validatedPayload = {};
+        }
+        await queue.add(job.type, { dbJobId: job.id, payload: validatedPayload }, { jobId: job.id });
       } catch (err) {
         logger.error({ jobId: job.id, error: String(err) }, 'Failed to re-enqueue reclaimed job');
       }
@@ -69,7 +98,20 @@ async function reclaimStaleJobs() {
     for (const job of orphanedQueued) {
       try {
         const queue = getQueue(job.type as JobType);
-        await queue.add(job.type, { dbJobId: job.id, payload: job.payload }, { jobId: job.id });
+        // Race guard: skip if already in BullMQ
+        const existing = await queue.getJob(job.id);
+        if (existing && (await existing.isActive() || await existing.isWaiting() || await existing.isDelayed())) {
+          logger.info({ jobId: job.id }, 'Orphaned QUEUED job already in BullMQ — skipping re-enqueue');
+          continue;
+        }
+        let validatedPayload = job.payload;
+        if (typeof validatedPayload === "string") {
+          try { validatedPayload = JSON.parse(validatedPayload); } catch { validatedPayload = {}; }
+        }
+        if (!validatedPayload || typeof validatedPayload !== "object") {
+          validatedPayload = {};
+        }
+        await queue.add(job.type, { dbJobId: job.id, payload: validatedPayload }, { jobId: job.id });
       } catch (err) {
         logger.error({ jobId: job.id, error: String(err) }, 'Failed to re-enqueue orphaned QUEUED job');
       }
@@ -253,7 +295,17 @@ export async function startWorker() {
             }
           }
 
-          await handler({ payload: processedPayload, jobId: dbJobId });
+          const timeoutMs = JOB_TIMEOUTS[jobType] ?? DEFAULT_JOB_TIMEOUT_MS;
+          await Promise.race([
+            handler({ payload: processedPayload, jobId: dbJobId }),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error(`Job timed out after ${timeoutMs}ms`)),
+                timeoutMs
+              )
+            ),
+          ]);
+
           await markDone(dbJobId, jobType, payload);
           jobsProcessed++;
           log.info({ durationMs: Date.now() - start }, 'Job completed');
@@ -336,6 +388,28 @@ export function startHealthServer(port = 3011) {
           where: { status: JobStatus.RUNNING },
         });
 
+        // ── Stall metrics ──
+        const staleThreshold = new Date(Date.now() - STALE_RUNNING_MINUTES * 60 * 1000);
+        const staleRunning = await getPrisma().job.count({
+          where: {
+            status: JobStatus.RUNNING,
+            OR: [
+              { startedAt: null },
+              { startedAt: { lt: staleThreshold } },
+            ],
+          },
+        });
+        const orphanedQueued = await getPrisma().job.count({
+          where: {
+            status: JobStatus.QUEUED,
+            createdAt: { lt: staleThreshold },
+            attempts: { lt: 3 },
+          },
+        });
+        const failedCount = await getPrisma().job.count({
+          where: { status: JobStatus.FAILED },
+        });
+
         const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
         const failureRate = jobsProcessed > 0 ? jobsFailed / jobsProcessed : 0;
         const memUsage = process.memoryUsage();
@@ -345,6 +419,9 @@ export function startHealthServer(port = 3011) {
           backend: "bullmq",
           queueDepth,
           runningJobs,
+          staleRunning,
+          orphanedQueued,
+          failedJobs: failedCount,
           jobsProcessed,
           jobsFailed,
           failureRate: Number(failureRate.toFixed(4)),

@@ -11,6 +11,13 @@ import { transcribeVideo, TranscriptionResult } from "../transcription";
 // US-014: centralized quality flag + error recording (graceful degradation, circuit breaker, user-visible messages)
 import { createLogger } from "../logger";
 import { recordQualityFlags, markPartialSuccess, recordJobError } from "./quality-tracking";
+// S1-06: AI interestingness — temporal window scoring + quote quality analysis
+import {
+  analyzeTemporalInterestingness,
+  analyzeQuoteQuality,
+  buildSegmentsFromWindows,
+  buildSegmentsFromQuotes,
+} from "../ai-interestingness";
 
 interface ScoreClipPayload {
   assetId: string;
@@ -25,6 +32,9 @@ const TMP_BASE = "/tmp/gis/score";
 const VENICE_API_URL = process.env.VISION_API_URL || process.env.VENICE_API_URL || "https://api.venice.ai/api/v1";
 const VENICE_API_KEY = process.env.VISION_API_KEY || process.env.VENICE_API_KEY || "";
 const VISION_MODEL = process.env.VISION_MODEL || "z-ai-glm-5v-turbo";
+
+// S1-06: Feature flag — disable AI interestingness entirely for emergencies
+const ENABLE_AI_INTERESTINGNESS = process.env.AI_INTERESTINGNESS_ENABLED !== "false";
 
 // Sport-specific keyword lists (configurable)
 const SPORT_KEYWORDS: Record<string, string[]> = {
@@ -41,6 +51,8 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
   // Quality tracking for partial failures (US-014)
   let visionFailedBatches = 0;
   let visionUsedFallback = false;
+  let interestingnessFailed = false;
+  let quotesFailed = false;
 
   const tmpDir = join(TMP_BASE, assetId);
   await fs.mkdir(tmpDir, { recursive: true });
@@ -98,10 +110,9 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
 
     const analysisDuration = needsWindow ? Math.max(0.1, winEnd - winStart) : (asset.durationSeconds || 0);
     const sport = asset.event?.sport?.toLowerCase() || "default";
+    const eventName = asset.event?.name || "Unknown Event";
 
     // ── 2. Run STT on raw video (dual-path: Venice beta with diarization primary, Whisper fallback)
-    // S1-03: if parent ingest already ran transcription and stored transcriptWordsJson,
-    // skip re-transcribing and reconstruct transcript from the scoped word data.
     let sttResult: TranscriptionResult;
     const existingWords = (asset as any).transcriptWordsJson;
     if (existingWords && Array.isArray(existingWords) && existingWords.length > 0) {
@@ -112,7 +123,6 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         speakerLabel: w.speakerLabel ? String(w.speakerLabel) : undefined,
       }));
       const transcript = words.map((w: any) => w.word).join(" ");
-      // Reconstruct segments from word gaps (>1.5s or >=12 words)
       const segments: Array<{ start: number; end: number; text: string }> = [];
       let cur: typeof words = [];
       for (const w of words) {
@@ -136,7 +146,6 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
           text: cur.map((cw: any) => cw.word).join(" "),
         });
       }
-      // Reconstruct speaker segments if speakerLabel present on words
       const speakerSegs: Array<{ speakerLabel: string; start: number; end: number; text: string }> = [];
       const groupedBySpeaker = new Map<string, typeof words>();
       for (const w of words) {
@@ -162,7 +171,6 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       };
     } else {
       sttResult = await transcribeVideo(analysisPath);
-      // Persist word-level timestamps on the Asset for downstream speech segmentation (S1-03)
       if (sttResult.words.length > 0) {
         await prisma.asset.update({
           where: { id: assetId },
@@ -190,18 +198,16 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     // ── 4. Compute motion score EARLY (for clipType + dynamic frame strategy) ──
     const motionScore = await computeMotionScore(analysisPath);
 
-    // ── S1-05: Audio signal rescue — detect crowd roar / celebration via energy peaks ──
+    // ── S1-05: Audio signal rescue ──
     const { hasCrowdRoar, roarScore } = await detectCrowdRoar(analysisPath);
 
-    // ── S1-05: Clip type assignment with audio signal awareness ──
+    // ── S1-05: Clip type assignment ──
     let clipType = assignClipType(motionScore, audioScore);
-
-    // ── S1-05: Low-motion + high-signal audio clips get rescued to SPEECH/MIXED ──
     let audioSignalRescue = false;
     if (motionScore < 30 && (audioScore > 50 || hasCrowdRoar)) {
       audioSignalRescue = true;
       if (clipType !== ClipType.SPEECH && clipType !== ClipType.MIXED) {
-        clipType = ClipType.MIXED; // rescue: audio is rich even if visually static
+        clipType = ClipType.MIXED;
       }
     }
 
@@ -210,17 +216,16 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     const fps = (clipType === ClipType.ACTION || clipType === ClipType.MIXED) ? 3 : 1;
     const rawFrameCount = Math.ceil(analysisDuration * fps);
     const frameCount = Math.min(rawFrameCount, MAX_FRAMES_PER_CLIP);
-    // If capped, reduce density proportionally with evenly-spaced coverage
     const interval = frameCount < rawFrameCount ? analysisDuration / frameCount : 1 / fps;
 
     const framesDir = join(tmpDir, "frames");
     await fs.mkdir(framesDir, { recursive: true });
     const framePaths = await extractKeyframes(analysisPath, framesDir, frameCount, interval, analysisDuration);
 
-    // ── 7. Vision analysis on keyframes — ONLY momentScore + productionScore (proposal A) ──
+    // ── 7. Vision analysis on keyframes ──
     let momentScore = 0;
     let productionScore = 0;
-    let hasFaces = false; // simplified: no longer returned by vision (can be enhanced with local face detection later)
+    let hasFaces = false;
 
     if (VENICE_API_KEY && framePaths.length > 0) {
       const visionResults = await analyzeKeyframesWithVision(framePaths, sport);
@@ -230,8 +235,132 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       visionUsedFallback = visionResults.visionUsedFallback;
     }
 
-    // ── 8. Tiered compositeScore using event.qualityTier + transparent TIER_FORMULAS ──
-    // S1-05: SPEECH clips use 70/30 audio/visual weight split instead of tier-based moment/prod
+    // ═══════════════════════════════════════════════════════════════
+    // ── 7a. S1-06: AI Temporal Interestingness Analysis ──
+    // For continuous cell-phone videos, ffmpeg scene detection doesn't work.
+    // Instead, split the video into ~8s windows and use AI vision to score
+    // each window for excitement/action/emotion/peak moments.
+    // ═══════════════════════════════════════════════════════════════
+    let interestingnessResult: Awaited<ReturnType<typeof analyzeTemporalInterestingness>> | null = null;
+    let quoteQualityResult: Awaited<ReturnType<typeof analyzeQuoteQuality>> | null = null;
+
+    if (ENABLE_AI_INTERESTINGNESS && VENICE_API_KEY && analysisDuration >= 4) {
+      const log = createLogger({ stage: "SCORE_CLIP_AI_INTERESTINGNESS" });
+
+      // Only run on clips that could benefit (not extremely short clips or pure speech)
+      const shouldRunInterestingness =
+        clipType === ClipType.ACTION || clipType === ClipType.MIXED || clipType === ClipType.MONTAGE;
+
+      if (shouldRunInterestingness) {
+        try {
+          interestingnessResult = await analyzeTemporalInterestingness(
+            analysisPath,
+            analysisDuration,
+            {
+              windowDuration: 8,
+              framesPerWindow: 3,
+              maxWindows: Math.min(40, Math.ceil(analysisDuration / 8)),
+              sport,
+              eventName,
+            }
+          );
+          log.info({
+            avgInterestingness: interestingnessResult.averageInterestingness,
+            topWindows: interestingnessResult.topWindowIndices,
+            apiCalls: interestingnessResult.totalApiCalls,
+            failed: interestingnessResult.failedApiCalls,
+          }, "Temporal interestingness analysis complete");
+        } catch (err) {
+          interestingnessFailed = true;
+          log.warn({ err }, "Temporal interestingness analysis failed — continuing without it");
+        }
+      }
+
+      // Run quote quality if we have a transcript with content
+      if (transcript.trim().length > 20) {
+        try {
+          quoteQualityResult = await analyzeQuoteQuality(
+            transcript,
+            speakerSegments.map((s) => ({ speakerLabel: s.speakerLabel, start: s.start, end: s.end, text: s.text })),
+            {
+              maxQuotes: 5,
+              sport,
+              eventName,
+            }
+          );
+          log.info({
+            quoteCount: quoteQualityResult.quotes.length,
+            avgQuality: quoteQualityResult.averageQuoteQuality,
+            model: quoteQualityResult.modelUsed,
+          }, "Quote quality analysis complete");
+        } catch (err) {
+          quotesFailed = true;
+          log.warn({ err }, "Quote quality analysis failed — continuing without it");
+        }
+      }
+    }
+
+    // ── 7b. S1-06: Create child CLIP assets from interestingness windows ──
+    // Top windows are extracted as child Asset(type=CLIP) entries so the campaign
+    // composer can select specific high-interest moments rather than whole clips.
+    if (interestingnessResult && interestingnessResult.windows.length > 0) {
+      const topSegments = buildSegmentsFromWindows(interestingnessResult.windows, {
+        threshold: 50,
+        maxSegments: 5,
+        mergeGap: 3,
+      });
+
+      for (const seg of topSegments) {
+        const offsetMs = needsWindow ? Math.round(winStart * 1000) : 0;
+        const childStartMs = offsetMs + Math.round(seg.startTime * 1000);
+        const childEndMs = offsetMs + Math.round(seg.endTime * 1000);
+
+        await prisma.asset.create({
+          data: {
+            eventId,
+            type: "CLIP",
+            parentAssetId: assetId,
+            immichAssetId, // same parent video reference
+            startTimeMs: childStartMs,
+            endTimeMs: childEndMs,
+            status: "UPLOADED", // will be scored separately if needed
+            motionLevel: "HIGH",
+            dominantMode: "ACTION",
+          },
+        });
+      }
+    }
+
+    // ── 7c. S1-06: Create child CLIP assets for top quotes ──
+    if (quoteQualityResult && quoteQualityResult.quotes.length > 0) {
+      const quoteSegments = buildSegmentsFromQuotes(quoteQualityResult.quotes, {
+        threshold: 60,
+        maxSegments: 4,
+        padSeconds: 2,
+      });
+
+      for (const qs of quoteSegments) {
+        const offsetMs = needsWindow ? Math.round(winStart * 1000) : 0;
+        const childStartMs = offsetMs + Math.round(qs.startTime * 1000);
+        const childEndMs = offsetMs + Math.round(qs.endTime * 1000);
+
+        await prisma.asset.create({
+          data: {
+            eventId,
+            type: "CLIP",
+            parentAssetId: assetId,
+            immichAssetId,
+            startTimeMs: childStartMs,
+            endTimeMs: childEndMs,
+            status: "UPLOADED",
+            motionLevel: "LOW",
+            dominantMode: "SPEECH",
+          },
+        });
+      }
+    }
+
+    // ── 8. Tiered compositeScore ──
     const eventTier = asset.event?.qualityTier ?? "PROFESSIONAL";
     let finalComposite = 0;
     if (clipType === ClipType.SPEECH) {
@@ -243,6 +372,9 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
 
     // ── 9. Upsert ClipScore record (allows re-runs) ──
     const speakerSegmentsJson = speakerSegments.length > 0 ? speakerSegments : null;
+    const interestingnessJson = interestingnessResult?.windows ?? null;
+    const quoteScoresJson = quoteQualityResult?.quotes ?? null;
+
     await prisma.clipScore.upsert({
       where: { assetId },
       create: {
@@ -265,6 +397,8 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         keywordHits: JSON.stringify(keywordHits),
         transcriptionProvider: provider,
         speakerSegmentsJson: speakerSegmentsJson as any,
+        interestingnessJson: interestingnessJson as any,
+        quoteScoresJson: quoteScoresJson as any,
       },
       update: {
         visionScore: Math.round(productionScore),
@@ -285,6 +419,8 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         keywordHits: JSON.stringify(keywordHits),
         transcriptionProvider: provider,
         speakerSegmentsJson: speakerSegmentsJson as any,
+        interestingnessJson: interestingnessJson as any,
+        quoteScoresJson: quoteScoresJson as any,
       },
     });
 
@@ -385,15 +521,14 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       }
     }
 
-// ── 14. Record structured quality flags on the Job (US-014) ──
-    // Use centralized helper so failures, fallbacks, and vision batch stats are
-    // consistently stored, trigger circuit breakers, and become visible to users.
-// US-014: ensure every failure path records the error for user visibility,
-// circuit-breaker triggering, and auditability. Re-throw so the worker
-// can set final Job status (FAILED / retry / dead-letter).
+    // ── 14. Record structured quality flags on the Job (US-014) ──
     await recordQualityFlags(args.jobId, "score-clip", {
       visionFailedBatches,
       visionUsedFallback,
+      interestingnessFailed,
+      quotesFailed,
+      interestingnessApiCalls: interestingnessResult?.totalApiCalls ?? 0,
+      interestingnessFailures: interestingnessResult?.failedApiCalls ?? 0,
       sttFailed: false,
       transcriptionProvider: provider,
     });
@@ -401,7 +536,6 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     await recordJobError(args.jobId, err as Error, "score-clip");
     throw err;
   } finally {
-    // ── 14. Clean up temp files ──
     try {
       await fs.rm(tmpDir, { recursive: true, force: true });
     } catch {
@@ -409,9 +543,6 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     }
   }
 }
-
-// S1-02/S1-03: transcription now lives in src/lib/transcription.ts (shared module)
-// Imported at top of file: import { transcribeVideo, TranscriptionResult } from "../transcription";
 
 // ── Audio score computation with speaker-aware weighting (S1-02) ──
 function computeAudioScore(
@@ -433,12 +564,10 @@ function computeAudioScore(
     }
   }
 
-  // Speech density
   const totalSpeech = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
   const totalDuration = segments.length > 0 ? segments[segments.length - 1].end : 1;
   const density = Math.min(totalSpeech / Math.max(totalDuration, 1), 1);
 
-  // Speaker-aware keyword weighting: coach-identified segments count 2×
   let weightedKeywordCount = keywordCount;
   if (speakerSegments && speakerSegments.length > 0) {
     for (const seg of speakerSegments) {
@@ -448,7 +577,7 @@ function computeAudioScore(
         const regex = new RegExp(`\\b${kw}\\b`, "gi");
         const segMatches = segLower.match(regex);
         if (segMatches && isCoach) {
-          weightedKeywordCount += segMatches.length; // extra +1× on top of base
+          weightedKeywordCount += segMatches.length;
         }
       }
     }
@@ -458,7 +587,6 @@ function computeAudioScore(
   const densityBonus = density * 25;
   const score = Math.max(0, Math.min(100, keywordScore + densityBonus));
 
-  // Coach speech heuristic: long continuous segments with directive words
   const hasCoachSpeech = segments.some(
     (s) => s.text.length > 20 && /(come on|let's|go to|move|position|defense|attack)/i.test(s.text)
   );
@@ -468,7 +596,7 @@ function computeAudioScore(
 
 // ── Keyframe extraction (scene-cut aware) ──
 async function detectSceneChanges(videoPath: string): Promise<number[]> {
-  const SCENE_TIMEOUT_MS = 300_000; // 5 minutes
+  const SCENE_TIMEOUT_MS = 300_000;
 
   const { proc } = spawnLimitedFfmpeg([
     "-i", videoPath,
@@ -500,13 +628,10 @@ async function extractKeyframes(
   interval: number,
   duration: number
 ): Promise<string[]> {
-  // 1. Detect scene changes for smarter frame selection
   const sceneChanges = await detectSceneChanges(videoPath);
 
-  // 2. Build frame timestamps: scene changes + midpoints between scenes
   let timestamps: number[] = [];
   if (sceneChanges.length >= 2 && sceneChanges.length <= maxFrames * 2) {
-    // Use scene changes + midpoints for action clips
     for (let i = 0; i < sceneChanges.length; i++) {
       timestamps.push(sceneChanges[i]);
       if (i < sceneChanges.length - 1) {
@@ -515,27 +640,23 @@ async function extractKeyframes(
       }
     }
   } else if (sceneChanges.length > 0) {
-    // Too many scene changes — pick evenly from the scene change list
     const step = sceneChanges.length / maxFrames;
     for (let i = 0; i < maxFrames; i++) {
       timestamps.push(sceneChanges[Math.floor(i * step)]);
     }
   } else {
-    // No scene changes (static/speech clip) — evenly spaced using provided interval
     for (let i = 0; i < maxFrames; i++) {
       timestamps.push(interval * i + interval / 2);
     }
   }
 
-  // 3. Clamp timestamps to duration, deduplicate, and sort
   timestamps = Array.from(new Set(timestamps.filter((t) => t < duration).map((t) => Math.round(t * 100) / 100))).sort((a, b) => a - b);
 
-  // 4. Extract frames
   const paths: string[] = [];
   for (let i = 0; i < timestamps.length; i++) {
     const time = timestamps[i];
     const outPath = join(outputDir, `frame_${i}.jpg`);
-    const FRAME_TIMEOUT_MS = 60_000; // 1 minute per frame
+    const FRAME_TIMEOUT_MS = 60_000;
     const { proc } = spawnLimitedFfmpeg([
       "-ss", time.toFixed(3),
       "-i", videoPath,
@@ -574,7 +695,6 @@ Return ONLY a valid JSON object with these two fields:
 
 Return ONLY the JSON object, no markdown, no explanations.`;
 
-  // Read frames in batches of 6 (S1-04: increased from 3)
   const batchSize = 6;
   const momentScores: number[] = [];
   const productionScores: number[] = [];
@@ -676,7 +796,6 @@ async function computeMotionScore(videoPath: string): Promise<number> {
         if (!isNaN(t)) timestamps.push(t);
       }
 
-      // Get duration for normalization
       const { proc: durProc } = spawnLimitedFfprobe([
         "-v", "error",
         "-show_entries", "format=duration",
@@ -711,7 +830,6 @@ async function detectCrowdRoar(
 ): Promise<{ hasCrowdRoar: boolean; roarScore: number }> {
   const ROAR_TIMEOUT_MS = 60_000;
   return new Promise((resolve) => {
-    // Extract mean volume per second using ffmpeg volumedetect on 1-second windows
     const { proc } = spawnLimitedFfmpeg([
       "-i", videoPath,
       "-af", "asetnsamples=n=16000,volumedetect",
@@ -720,7 +838,6 @@ async function detectCrowdRoar(
     let stderr = "";
     proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", () => {
-      // Parse mean_volume and max_volume from volumedetect output
       const meanMatch = stderr.match(/mean_volume:\s*([-\d.]+)\s*dB/);
       const maxMatch = stderr.match(/max_volume:\s*([-\d.]+)\s*dB/);
       if (!meanMatch || !maxMatch) {
@@ -729,12 +846,9 @@ async function detectCrowdRoar(
       }
       const meanVol = parseFloat(meanMatch[1]);
       const maxVol = parseFloat(maxMatch[1]);
-      // Loudness range: typical speech ~-20dB, crowd roar can spike to -5dB
-      // mean above -15dB or max above -3dB suggests crowd noise
       const hasCrowdRoar = meanVol > -15 || maxVol > -3;
-      // Score 0-100: louder = higher score
       const roarScore = Math.min(100, Math.round(
-        Math.max(0, (meanVol + 40) * 2.5) // -40dB -> 0, -15dB -> 62, -5dB -> 87
+        Math.max(0, (meanVol + 40) * 2.5)
       ));
       resolve({ hasCrowdRoar, roarScore });
     });
@@ -742,7 +856,7 @@ async function detectCrowdRoar(
   });
 }
 
-// ── Cut a temporal window from a source (for legacy child CLIP scene re-scoring) ──
+// ── Cut a temporal window from a source ──
 async function cutWindow(
   sourcePath: string,
   outputPath: string,

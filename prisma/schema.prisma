@@ -81,6 +81,8 @@ model ClipScore {
   keywordHits       Json?
   transcriptionProvider String? // "venice-beta" | "whisper-fallback" | null
   speakerSegmentsJson   Json?     // Array of {speakerLabel, start, end, text}
+  interestingnessJson  Json?     // S1-06: array of {windowIndex,startTime,endTime,interestingnessScore,description,hasAction,hasEmotion,hasPeakMoment}
+  quoteScoresJson      Json?     // S1-06: array of {text,startTime,endTime,speakerLabel,quoteQualityScore,reason}
   scoredAt          DateTime  @default(now())
   amateurScore      Float?    @map("amateurscore")
   intermediateScore Float?    @map("intermediatescore")
