@@ -35,22 +35,43 @@ export function registerHandler(type: JobType, handler: JobHandler) {
 
 async function reclaimStaleJobs() {
   const staleThreshold = new Date(Date.now() - STALE_RUNNING_MINUTES * 60 * 1000).toISOString();
-  const result = await getPrisma().$queryRaw<Array<{ id: string; type: string }>>`
+
+  // Reclaim stale RUNNING jobs
+  const result = await getPrisma().$queryRaw<Array<{ id: string; type: string; payload: any }>>`
     UPDATE "jobs"
     SET status = 'QUEUED', "startedAt" = NULL, attempts = LEAST(attempts + 1, "maxAttempts")
     WHERE status = 'RUNNING'
       AND ("startedAt" IS NULL OR "startedAt" < ${staleThreshold})
-    RETURNING id, type::text
+    RETURNING id, type::text, payload
   `;
   if (result.length > 0) {
     logger.info({ count: result.length, jobs: result.map((r) => r.id) }, 'Reclaimed stale RUNNING jobs');
-    // Re-enqueue stale jobs into BullMQ so they get picked up
     for (const job of result) {
       try {
         const queue = getQueue(job.type as JobType);
-        await queue.add(job.type, { dbJobId: job.id }, { jobId: job.id });
+        await queue.add(job.type, { dbJobId: job.id, payload: job.payload }, { jobId: job.id });
       } catch (err) {
         logger.error({ jobId: job.id, error: String(err) }, 'Failed to re-enqueue reclaimed job');
+      }
+    }
+  }
+
+  // Re-enqueue orphaned QUEUED jobs that may have been lost from BullMQ
+  const orphanedQueued = await getPrisma().$queryRaw<Array<{ id: string; type: string; payload: any }>>`
+    SELECT id, type::text, payload
+    FROM "jobs"
+    WHERE status = 'QUEUED'
+      AND "createdAt" < ${staleThreshold}
+      AND attempts < "maxAttempts"
+  `;
+  if (orphanedQueued.length > 0) {
+    logger.info({ count: orphanedQueued.length, jobs: orphanedQueued.map((r) => r.id) }, 'Re-enqueuing orphaned QUEUED jobs');
+    for (const job of orphanedQueued) {
+      try {
+        const queue = getQueue(job.type as JobType);
+        await queue.add(job.type, { dbJobId: job.id, payload: job.payload }, { jobId: job.id });
+      } catch (err) {
+        logger.error({ jobId: job.id, error: String(err) }, 'Failed to re-enqueue orphaned QUEUED job');
       }
     }
   }
