@@ -282,6 +282,18 @@ export async function startWorker() {
   }
 
   logger.info({ stage: "worker", workerCount: allWorkers.length }, "All BullMQ workers started");
+
+  // Periodic stale job patrol: reclaim RUNNING jobs that got orphaned by
+  // network hangs, worker stalls, or unhandled promise rejections.
+  // Reclaimer at startup handles boot-time orphans; this catches mid-flight ones.
+  const RECLAIM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  setInterval(async () => {
+    try {
+      await reclaimStaleJobs();
+    } catch (err) {
+      logger.error({ stage: "worker", error: String(err) }, "Periodic stale job reclaim failed");
+    }
+  }, RECLAIM_INTERVAL_MS);
 }
 
 export function stopWorker() {

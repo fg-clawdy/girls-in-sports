@@ -2,6 +2,20 @@ import { createWriteStream, createReadStream, statSync } from "fs";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 
+const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const METADATA_FETCH_TIMEOUT_MS = 10_000;
+const DOWNLOAD_UPLOAD_TIMEOUT_MS = 120_000;
+
+function timedFetch(
+  url: string,
+  init: RequestInit & { timeoutMs?: number }
+): Promise<Response> {
+  const { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, ...rest } = init;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  return fetch(url, { ...rest, signal: ac.signal }).finally(() => clearTimeout(timer));
+}
+
 function getImmichUrl(): string {
   return process.env.IMMICH_API_URL || "http://localhost:2283";
 }
@@ -70,8 +84,9 @@ export interface ImmichAsset {
 }
 
 export async function getAllAlbums(): Promise<ImmichAlbum[]> {
-  const res = await fetch(`${getImmichUrl()}/api/albums`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/albums`, {
     headers: getHeaders(),
+    timeoutMs: METADATA_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich albums fetch failed: ${res.status} ${res.statusText}`);
@@ -80,9 +95,10 @@ export async function getAllAlbums(): Promise<ImmichAlbum[]> {
 }
 
 export async function getAlbum(albumId: string): Promise<ImmichAlbum> {
-  const res = await fetch(`${getImmichUrl()}/api/albums/${albumId}?withoutAssets=false`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/albums/${albumId}?withoutAssets=false`, {
     headers: getHeaders(),
     cache: "no-store",
+    timeoutMs: METADATA_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich album fetch failed: ${res.status} ${res.statusText}`);
@@ -95,7 +111,7 @@ export async function createAlbum(
   description?: string,
   assetIds?: string[]
 ): Promise<ImmichAlbum> {
-  const res = await fetch(`${getImmichUrl()}/api/albums`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/albums`, {
     method: "POST",
     headers: getHeaders(),
     body: JSON.stringify({
@@ -103,6 +119,7 @@ export async function createAlbum(
       description: description || "",
       assetIds: assetIds || [],
     }),
+    timeoutMs: METADATA_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich album creation failed: ${res.status} ${res.statusText}`);
@@ -125,8 +142,9 @@ export function getAssetOriginalUrl(assetId: string): string {
 }
 
 export async function getAssetInfo(assetId: string): Promise<ImmichAsset> {
-  const res = await fetch(`${getImmichUrl()}/api/assets/${assetId}`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/assets/${assetId}`, {
     headers: getHeaders(),
+    timeoutMs: METADATA_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich asset fetch failed: ${res.status} ${res.statusText}`);
@@ -137,8 +155,9 @@ export async function getAssetInfo(assetId: string): Promise<ImmichAsset> {
 // --- Server Info ---
 
 export async function pingServer(): Promise<{ status: string }> {
-  const res = await fetch(`${getImmichUrl()}/api/server-info/ping`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/server-info/ping`, {
     headers: { Accept: "application/json" },
+    timeoutMs: METADATA_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich ping failed: ${res.status}`);
@@ -157,11 +176,12 @@ export async function downloadAssetToFile(
   assetId: string,
   localPath: string
 ): Promise<void> {
-  const res = await fetch(`${getImmichUrl()}/api/assets/${assetId}/original`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/assets/${assetId}/original`, {
     headers: {
       Accept: "application/octet-stream",
       "x-api-key": getImmichKey(),
     },
+    timeoutMs: DOWNLOAD_UPLOAD_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich download failed: ${res.status} ${res.statusText}`);
@@ -212,7 +232,7 @@ export async function uploadAssetFromFile(
   fileStream.on("end", () => combined.push(trailer));
   fileStream.on("error", (err) => combined.destroy(err));
 
-  const res = await fetch(`${getImmichUrl()}/api/assets`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/assets`, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -222,9 +242,9 @@ export async function uploadAssetFromFile(
         prelude.length + size + trailer.length
       ),
     },
-    // Node 18+ fetch requires duplex: 'half' for streaming request bodies
     body: Readable.toWeb(combined) as any,
     ...({ duplex: "half" } as any),
+    timeoutMs: DOWNLOAD_UPLOAD_TIMEOUT_MS,
   });
 
   if (!res.ok) {
@@ -239,7 +259,7 @@ export async function addAssetsToAlbum(
   albumId: string,
   assetIds: string[]
 ): Promise<void> {
-  const res = await fetch(`${getImmichUrl()}/api/albums/${albumId}/assets`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/albums/${albumId}/assets`, {
     method: "PUT",
     headers: {
       Accept: "application/json",
@@ -247,6 +267,7 @@ export async function addAssetsToAlbum(
       "x-api-key": getImmichKey(),
     },
     body: JSON.stringify({ ids: assetIds }),
+    timeoutMs: METADATA_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich add to album failed: ${res.status}`);
@@ -257,7 +278,7 @@ export async function updateAssetDescription(
   assetId: string,
   description: string
 ): Promise<void> {
-  const res = await fetch(`${getImmichUrl()}/api/assets/${assetId}`, {
+  const res = await timedFetch(`${getImmichUrl()}/api/assets/${assetId}`, {
     method: "PUT",
     headers: {
       Accept: "application/json",
@@ -265,6 +286,7 @@ export async function updateAssetDescription(
       "x-api-key": getImmichKey(),
     },
     body: JSON.stringify({ description }),
+    timeoutMs: METADATA_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw new Error(`Immich update description failed: ${res.status} ${await res.text()}`);

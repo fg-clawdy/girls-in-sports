@@ -91,11 +91,25 @@ export async function POST(
         const immichAssetId = uploadData.id;
 
         if (!immichAssetId) {
-          // Duplicate or unexpected response
           results.push({
             fileName: file.name,
             status: "uploaded",
             error: "Duplicate or no asset ID returned from Immich",
+          });
+          continue;
+        }
+
+        // ── Deduplication guard: skip if this event already has this immichAssetId ──
+        const existingAsset = await prisma.asset.findFirst({
+          where: { eventId: params.id, immichAssetId },
+        });
+        if (existingAsset) {
+          results.push({
+            fileName: file.name,
+            assetId: existingAsset.id,
+            immichAssetId,
+            status: "uploaded",
+            error: "Duplicate upload detected — skipped",
           });
           continue;
         }
