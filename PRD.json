@@ -62,8 +62,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "The exact current quote score threshold in score-clip.ts lines ~79-95 should be verified during implementation. The 15-point reduction is relative to that threshold."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. analyzeQuoteQuality now accepts activityTags: ActivityTag[] instead of sport/eventName. Prompt updated to be activity-aware. score-clip.ts passes activityTags to analyzeQuoteQuality. buildSegmentsFromQuotes threshold lowered from 60→45 when speech tag is present in activityTags. QuoteScore shape preserved. Commit: c86c8a1"
     },
     {
       "id": "US-005",
