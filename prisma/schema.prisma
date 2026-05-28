@@ -22,6 +22,7 @@ model Event {
   qualityTier     QualityTier      @default(PROFESSIONAL)
   costBudgetUSD       Float?
   currentEstimatedCost Float? @default(0)
+  activityTags    String[]         @default([])
   assets          Asset[]
   campaigns       Campaign[]
   feedbackRatings FeedbackRating[]
@@ -359,6 +360,13 @@ model AdminAuditLog {
   @@index([route])
   @@index([actor])
   @@map("admin_audit_logs")
+}
+
+enum ActivityTag {
+  SPORTS
+  PARTY
+  PLAY
+  SPEECH
 }
 
 enum EventStatus {

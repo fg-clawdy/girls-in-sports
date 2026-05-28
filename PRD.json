@@ -1,98 +1,212 @@
 {
-  "project": "Girls In Sports — Sprint 1: Smart Video Segmentation & Accurate Scoring",
-  "branchName": "dev/sprint1-smart-segmentation",
-  "description": "Vastly improve analysis accuracy and media clipping so every uploaded video is automatically decomposed into meaningful, individually-scored highlight clips before downstream curation or rendering.",
-  "source": "PRD.md (2026-05-24)",
-  "stories": [
+  "project": "GIS Video Segmentation & Scoring Improvements",
+  "branchName": "dev/ai-first-segmentation",
+  "description": "Replace ffmpeg-based segmentation with AI-first event-aware clip discovery, add activity tags to events, and generalize the Vision prompt system.",
+  "userStories": [
     {
-      "id": "S1-01",
-      "title": "Smart Video Segmentation During Ingest",
-      "acceptance": [
-        "Source videos >20 seconds are segmented into child CLIP Assets during INGEST_CLIP",
-        "Each child Asset has valid parentAssetId, startTimeMs, endTimeMs, durationSeconds, motionLevel, dominantMode",
-        "Child clips are individually queued for SCORE_CLIP jobs",
-        "Original source Asset status set to INGESTING while children process, then SCORED when all children complete",
-        "Videos ≤20 seconds produce a single child clip (passthrough)",
-        "Minimum clip length configurable (default 4s); very short segments merged with adjacent clips",
-        "Maximum clips per source: 20 (configurable); excess segments merged by motion-profile proximity"
+      "id": "US-001",
+      "title": "Add ActivityTag enum and activityTags field to Event schema",
+      "description": "As a pipeline developer, I want the Event model to store multi-select activity tags (sports, party, play, speech) so that downstream AI scoring can use per-event context to shape what counts as interesting.",
+      "acceptanceCriteria": [
+        "An ActivityTag enum is added to schema.prisma with values: SPORTS, PARTY, PLAY, SPEECH",
+        "The Event model gains an `activityTags` field of type `ActivityTag[]` (native PostgreSQL array via `String[]` in Prisma)",
+        "A migration is generated via `prisma migrate dev` and committed",
+        "Existing events without activityTags default to an empty array without migration errors",
+        "Typecheck passes"
       ],
-      "passes": true,
-      "commit": "188bbe0",
-      "notes": "Implemented idempotency guard, lowered threshold from 60s to 20s, and set motionLevel/dominantMode on child Asset creation. Full smart segmentation (merging by motion profile, speaker-aware boundaries, audio-driven segmentation) is deferred to future refinement."
+      "priority": 1,
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "S1-02",
-      "title": "Dual-Path Transcription with Venice Beta Primary + Whisper Fallback",
-      "acceptance": [
-        "transcribeVideo() tries Venice beta /audio/transcribe first",
-        "If beta succeeds with diarized segments: speaker labels stored alongside transcript words",
-        "Coach-speaker heuristic: directive words + longer utterances classified as coach",
-        "If beta fails: fall back to Whisper /audio/transcriptions (current behavior preserved)",
-        "Fallback logged with quality flag transcriptionFallback: true",
-        "Diarized speaker info feeds into audioScore: coach-identified speech weighted 2× vs unidentified",
-        "Quality flag records transcriptionProvider: venice-beta | whisper-fallback"
+      "id": "US-002",
+      "title": "Define ActivityTag TypeScript type and ACTIVITY_CONTEXT map in shared constants",
+      "description": "As a developer, I want a canonical TypeScript ActivityTag type and the activity-to-context lookup map in a shared module so that all pipeline code uses the same definitions without duplication.",
+      "acceptanceCriteria": [
+        "A new file `src/lib/activity-tags.ts` exports `type ActivityTag = 'sports' | 'party' | 'play' | 'speech'`",
+        "The file exports `const ACTIVITY_CONTEXT: Record<ActivityTag, string>` with the exact context strings specified in the design (sports, party, play, speech)",
+        "The file exports `buildVisionPrompt(activityTags: ActivityTag[]): string` that assembles BASE_PROMPT + activity context blocks + SCORING_INSTRUCTIONS in that order",
+        "`buildVisionPrompt([])` still returns a valid prompt consisting of BASE_PROMPT + SCORING_INSTRUCTIONS with no activity blocks in between",
+        "The Prisma `ActivityTag` enum values map 1:1 to the TypeScript union members (case-insensitive normalization in wiring code)",
+        "Typecheck passes"
       ],
-      "passes": true,
-      "commit": "aeee6df",
-      "notes": "Implemented dual-path: primary call requests diarization via diarize=true/diarize_audio=true params. Parses speaker segments from Venice response. If no speaker segments returned, falls back to standard Whisper. Coach weighting implemented in computeAudioScore: keyword matches in coach-identified speakerSegments get +1× bonus. transcriptWordsJson persisted on Asset. transcriptionProvider and speakerSegmentsJson stored in ClipScore."
+      "priority": 2,
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "S1-03",
-      "title": "Transcript-Driven Speech Clip Segmentation",
-      "acceptance": [
-        "STT word-level timestamps + motion LOW for ≥3s activates speech segmentation mode",
-        "Sentence-boundary detection (silence gaps ≥0.8s or punctuation) defines clip boundaries",
-        "Diarized speaker changes trigger segment boundaries",
-        "Each speech clip carries transcriptExcerpt scoped to its time window",
-        "Speech clips classified as ClipType.SPEECH",
-        "Audio signal score applied at 70% for SPEECH clips (vs 30% visual)"
+      "id": "US-003",
+      "title": "Update analyzeTemporalInterestingness to accept activityTags instead of sport",
+      "description": "As a pipeline developer, I want analyzeTemporalInterestingness to accept ActivityTag[] and use buildVisionPrompt to construct its prompt at runtime, so that Vision API calls are event-aware rather than hardcoded around youth sports.",
+      "acceptanceCriteria": [
+        "The function signature of `analyzeTemporalInterestingness` in `src/lib/ai-interestingness.ts` changes: the `sport` and `eventName` string parameters are replaced by `activityTags: ActivityTag[]`",
+        "The hardcoded youth-sports prompt (lines ~7-85 of ai-interestingness.ts) is replaced by a call to `buildVisionPrompt(activityTags)` imported from `src/lib/activity-tags.ts`",
+        "When `activityTags` is empty, the Vision call uses BASE_PROMPT + SCORING_INSTRUCTIONS only — no activity context blocks",
+        "The window scoring and JSON response parsing logic remains unchanged (only the prompt changes)",
+        "All existing tests in `__tests__/ai-interestingness.test.ts` are updated to pass `activityTags` instead of `sport`/`eventName`",
+        "Typecheck passes"
       ],
-      "passes": true,
-      "commit": "df7c97a",
-      "notes": "Implemented in ingest-clip.ts: runs transcription on source video, stores full transcriptWordsJson on parent Asset. mergeSegmentBoundaries() merges ffmpeg scene cuts with STT silence gaps (≥0.8s) and speaker changes. Each child Asset gets scoped transcriptWordsJson for its time window. score-clip.ts now reads existing transcriptWordsJson from Asset and reconstructs TranscriptionResult, skipping redundant transcription API calls."
+      "priority": 3,
+      "passes": false,
+      "notes": "The exact current prompt string spans roughly lines 7-85 of ai-interestingness.ts. The replacement must preserve the 3-frame window group structure and the 0-100 scoring dimensions."
     },
     {
-      "id": "S1-04",
-      "title": "Content-Aware Dynamic Frame Sampling",
-      "acceptance": [
-        "ACTION/MIXED clips sampled at 3 fps (capped at 120 frames)",
-        "SPEECH/MONTAGE clips sampled at 1 fps (capped by duration)",
-        "Absolute maximum: 120 frames per clip",
-        "Batch size increased from 3 to 6 frames per Venice API call",
-        "If duration × fps exceeds cap, density reduced proportionally with evenly-spaced coverage",
-        "Frame extraction uses ffmpeg -ss seek with absolute timestamps",
-        "MAX_FRAMES_PER_CLIP configurable via env var (default: 120)"
+      "id": "US-004",
+      "title": "Update analyzeQuoteQuality to increase sensitivity when speech tag is present",
+      "description": "As a pipeline developer, I want analyzeQuoteQuality to accept activityTags and boost its scoring threshold when `speech` is present, so that spoken content in speech-centric events (keynotes, coaching sessions) gets properly surfaced as child CLIP assets.",
+      "acceptanceCriteria": [
+        "The function signature of `analyzeQuoteQuality` in `src/lib/ai-interestingness.ts` changes: the `sport` and `eventName` string parameters are replaced by `activityTags: ActivityTag[]`",
+        "When `activityTags` includes `'speech'`, the quote quality scoring threshold is lowered by 15 points (from the current cutoff — currently ~60 based on existing score-clip.ts filtering) so more quotes are surfaced",
+        "When `'speech'` is NOT in `activityTags`, quote quality scoring behaves identically to today",
+        "The function still returns `QuoteScore[]` with the same shape (text, startTime, endTime, speakerLabel, quoteQualityScore, reason)",
+        "Typecheck passes"
       ],
-      "passes": true,
-      "commit": "927f003",
-      "notes": "Replaced fixed frame counts with tiered FPS strategy: ACTION/MIXED at 3 fps, everything else at 1 fps. frameCount = min(duration × fps, MAX_FRAMES_PER_CLIP). If capped, interval = duration / frameCount for evenly-spaced coverage. batchSize increased from 3 to 6 in analyzeKeyframesWithVision. extractKeyframes now accepts interval parameter instead of computing internally."
+      "priority": 3,
+      "passes": false,
+      "notes": "The exact current quote score threshold in score-clip.ts lines ~79-95 should be verified during implementation. The 15-point reduction is relative to that threshold."
     },
     {
-      "id": "S1-05",
-      "title": "Audio-Signal Rescue & Speech Scoring",
-      "acceptance": [
-        "Low-motion clips with high-signal audio identified and scored with boosted audio weight",
-        "Speech clips use 70/30 audio/visual weight split",
-        "Coach speech segments weighted 2× vs background speech",
-        "Crowd roar / celebration detected via audio energy peaks",
-        "Audio-driven composite score computed independently from motion score"
+      "id": "US-005",
+      "title": "Thread activityTags from Event through INGEST_CLIP and SCORE_CLIP job payloads",
+      "description": "As a pipeline developer, I want activityTags to be read from the Event record and included in job payloads for INGEST_CLIP and SCORE_CLIP, so that every AI scoring call has access to per-event context.",
+      "acceptanceCriteria": [
+        "INGEST_CLIP handler in `src/lib/handlers/ingest-clip.ts` reads `activityTags` from the Event record (via prisma.event.findUnique) before enqueuing SCORE_CLIP jobs",
+        "The INGEST_CLIP job payload (constructed in `src/lib/queues.ts` or the caller) includes `activityTags: string[]` alongside existing fields like `eventId`, `sport`, `eventName`",
+        "SCORE_CLIP handler in `src/lib/handlers/score-clip.ts` reads `activityTags` from its job payload and passes it to both `analyzeTemporalInterestingness` and `analyzeQuoteQuality`",
+        "The SCORE_CLIP handler passes `activityTags` to `analyzeAndSegment` in `src/lib/scene-detection-service.ts` (for future Track B use)",
+        "Existing `sport` and `eventName` fields on the job payload are preserved for backward compatibility during the transition — new code reads `activityTags` first and falls back to inferring tags from `sport`",
+        "Typecheck passes"
       ],
-      "passes": true,
-      "commit": "0de6ff0",
-      "notes": "Added detectCrowdRoar() using ffmpeg volumedetect filter — mean > -15dB or max > -3dB triggers hasCrowdRoar. SPEECH clips now bypass tiered scoring and use 70/30 audio/production weight split. Low-motion (<30) + high-audio (>50 or hasCrowdRoar) clips get audioSignalRescue=true and clipType promoted to MIXED. hasCrowdRoar and audioSignalRescue fields added to ClipScore schema and Immich tags."
+      "priority": 4,
+      "passes": false,
+      "notes": "The fallback inference from `sport` to `activityTags: ['sports']` is a transitional measure and should be logged with a deprecation warning."
     },
     {
-      "id": "S1-06",
-      "title": "User-Selectable Music Model",
-      "acceptance": [
-        "Campaign creation UI shows music model selector: minimax-music-v26 (default), elevenlabs-music [expensive - $1.25], minimax-music-v2, minimax-music-v25",
-        "Model selection stored in Campaign.musicModel",
-        "generate-music.ts reads Campaign.musicModel and calls correct endpoint",
-        "If selected model fails, fallback to minimax-music-v26 (never ace-step)"
+      "id": "US-006",
+      "title": "Update event creation API to accept and store activityTags",
+      "description": "As a user, I want to select activity tags (sports, party, play, speech) when creating or editing an event so that AI scoring is tailored to my event type.",
+      "acceptanceCriteria": [
+        "`POST /api/events` in `src/app/api/events/route.ts` accepts an optional `activityTags: string[]` field validated against the allowlist ['sports', 'party', 'play', 'speech']",
+        "`PATCH /api/events/[id]` in `src/app/api/events/[id]/route.ts` accepts an optional `activityTags: string[]` field with the same validation",
+        "Invalid or unknown tag values return a 400 error with message `\"Invalid activity tags: <comma-separated list>\"`",
+        "Prisma create/update calls include `activityTags` in the data payload",
+        "Events created without `activityTags` default to an empty array",
+        "Typecheck passes"
       ],
-      "passes": true,
-      "commit": "b40b434",
-      "notes": "Campaign schema already had musicModelPreference field. UI added pill selector in event page Creative Brief panel with 4 models. API validates against allowlist and defaults to minimax-music-v26. generate-music.ts reads campaign.musicModelPreference, tries that model first, falls back to minimax-music-v26 on failure. Removed old hardcoded elevenlabs-music → ace-step fallback."
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Add activity tag multi-select to the event creation and edit modals",
+      "description": "As a user, I want a tag selector in the create/edit event modal on the Dashboard page so that I can pick which activity types describe my event.",
+      "acceptanceCriteria": [
+        "The create event modal in `src/app/dashboard/page.tsx` (lines ~450-524) gains a new field `Activity Type` with four toggleable pill buttons: Sports, Party, Play, Speech",
+        "The edit event modal (lines ~527-598) gains the same activity tag selector, pre-populated with the event's current tags",
+        "At least one tag must be selected; the form shows validation error if none selected on submit attempt",
+        "Selected tags are sent to the API as `activityTags: string[]` in the POST/PATCH request body",
+        "The tags display in the event detail page (`src/app/events/[id]/page.tsx`) as colored pill badges",
+        "The `createForm` state (line 85 of dashboard/page.tsx) includes `activityTags: string[]` initialized to `['sports']` as default",
+        "The edit flow pre-populates `editForm.activityTags` from the fetched event data",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "The current `createForm` state is defined on line 85 of dashboard/page.tsx with fields { name, sport, city, eventDate, description }. Tailwind classes for pills can follow the existing accent/color pattern used throughout the UI. The event detail page at src/app/events/[id]/page.tsx will need minor addition to render activity tags."
+    },
+    {
+      "id": "US-008",
+      "title": "Implement computeAudioEnergyProfile in ffmpeg-utils.ts",
+      "description": "As a pipeline developer, I want a function that uses ffmpeg volumedetect to produce a timeline of audio energy levels across an entire source video, so that candidate windows for AI scoring can be pre-filtered by audio activity without requiring STT.",
+      "acceptanceCriteria": [
+        "`computeAudioEnergyProfile(videoPath: string)` is added to `src/lib/ffmpeg-utils.ts`, returning `Promise<AudioEnergyProfile>`",
+        "`AudioEnergyProfile` is typed as `{ segments: Array<{ startTime: number; endTime: number; meanDb: number; maxDb: number }>; duration: number }`",
+        "The function uses `spawnLimitedFfmpeg` with the `volumedetect` filter to compute mean_volume and max_volume per 1-second windows across the full video",
+        "The `nice` parameter is set to 15 and `timeoutMs` to 300_000 to match existing ffmpeg-utils conventions",
+        "Stderr output is parsed to extract `mean_volume` and `max_volume` dB values per segment, converting to a structured array",
+        "If ffmpeg fails or produces no usable output, the function returns an empty profile with `segments: []` and the video duration from ffprobe",
+        "Memory usage stays within OOM-safe bounds: streaming stderr parsing with 64 KB buffer, no full-buffer accumulation beyond what's needed for single-line parsing",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "volumedetect does not natively produce per-second windows. Implement by segmenting the audio stream with `asegment` and then applying `astats` per segment, OR by running volumedetect on the full stream and post-processing the single mean/max values as a single-segment profile for MVP. The acceptance criteria allow a simplified initial implementation where the full-video mean/max is treated as one segment — refine to per-second windows in a follow-up if needed."
+    },
+    {
+      "id": "US-009",
+      "title": "Implement identifyCandidateWindows to merge motion density and audio energy into ranked time windows",
+      "description": "As a pipeline developer, I want a function that merges motion density scoring and audio energy profiles into ranked candidate time windows sorted by interest likelihood, so that only promising windows are sent to the Vision API.",
+      "acceptanceCriteria": [
+        "`identifyCandidateWindows(motionProfile: MotionDensityResult, audioProfile: AudioEnergyProfile, duration: number)` is added to `src/lib/video-segmentation.ts` (or a new `src/lib/candidate-windows.ts`), returning `Promise<CandidateWindow[]>`",
+        "`CandidateWindow` is typed as `{ startTime: number; endTime: number; motionScore: number; audioScore: number; combinedScore: number }`",
+        "Motion density is computed by running ffmpeg with `select='gt(scene,0.1)'` at low threshold (retained as one signal) to get motion change timestamps, then scoring 1-second buckets by density of motion changes",
+        "Audio score per window is derived from `computeAudioEnergyProfile` — windows overlapping high-energy audio segments get higher scores",
+        "Combined score = motionScore * 0.4 + audioScore * 0.6 (audio-weighted since speech/celebration events have low motion but high value)",
+        "Windows shorter than 2 seconds are merged with adjacent windows",
+        "Windows longer than 30 seconds are split at the lowest-confidence point",
+        "Maximum 30 candidate windows returned, ranked by combinedScore descending",
+        "If both motion and audio profiles are empty, returns a single window spanning the full video duration (fallback to uniform sampling)",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Refactor analyzeAndSegment to use AI-first candidate windows on source video",
+      "description": "As a pipeline developer, I want analyzeAndSegment in scene-detection-service.ts to run AI temporal interestingness on the source video using candidate windows (not on post-segmentation child clips), so that AI scoring guides segmentation rather than following it.",
+      "acceptanceCriteria": [
+        "`analyzeAndSegment` in `src/lib/scene-detection-service.ts` is refactored: instead of calling `segmentVideo` → create child clips → then run `analyzeTemporalInterestingness` on children, the new flow is:",
+        "1. Call `computeAudioEnergyProfile(sourceVideoPath)` to get audio energy timeline",
+        "2. Call ffmpeg motion detection at low threshold (scene=0.1) to get motion density profile",
+        "3. Call `identifyCandidateWindows(motionProfile, audioProfile, duration)` to get ranked candidate windows",
+        "4. Extract frames at the midpoints of each candidate window (one frame per window, up to 30 windows)",
+        "5. Call `analyzeTemporalInterestingness(sourceAssetId, sourceVideoPath, candidateWindowsAsFrames, activityTags)` to score each window",
+        "6. Apply boundary refinement: snap to I-frames, add 0.5s pre-roll / 1.0s post-roll buffers, merge windows within 2s of each other, enforce min 3s / max 30s clip lengths",
+        "7. High-scoring windows (combinedScore ≥ threshold) become child CLIP Asset records with `parentAssetId`, `startTimeMs`, `endTimeMs`, `durationSeconds`, `motionLevel`, `dominantMode`",
+        "The existing `segmentVideo` function and `detectScenes` continue to exist as utility functions (not removed) but are no longer the primary segmentation gate",
+        "The `analyzeAndSegment` function signature gains `activityTags: ActivityTag[]` as a parameter",
+        "Existing tests in `__tests__/clips-child-assets.test.ts` continue to pass after refactor",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "The current `analyzeAndSegment` signature in scene-detection-service.ts is `(sourceAssetId: string, sourceVideoPath: string, eventId: string, sport?: string, eventName?: string)`. It orchestrates the full segmentation → child clip creation → SCORE_CLIP enqueue pipeline. The refactor must preserve child Asset creation with the same schema fields (parentAssetId, startTimeMs, endTimeMs, durationSeconds, motionLevel, dominantMode) and the same SCORE_CLIP enqueue pattern."
+    },
+    {
+      "id": "US-011",
+      "title": "Update INGEST_CLIP handler to pass activityTags into analyzeAndSegment and ensure quote analysis runs for speech events",
+      "description": "As a pipeline developer, I want the INGEST_CLIP handler to pass activityTags into the refactored analyzeAndSegment and to trigger analyzeQuoteQuality when the speech tag is present, so that speech-centric events get transcript-based clip discovery during ingest.",
+      "acceptanceCriteria": [
+        "The INGEST_CLIP handler in `src/lib/handlers/ingest-clip.ts` passes `activityTags` from its job payload into `analyzeAndSegment` (already accepted by US-010)",
+        "When `activityTags` includes `'speech'`, the handler runs `analyzeQuoteQuality` on the source video's transcript during INGEST_CLIP (not only during SCORE_CLIP)",
+        "Quote clips discovered by `analyzeQuoteQuality` are created as child CLIP Assets with `dominantMode: 'SPEECH'` and the transcript excerpt stored in their `transcriptWordsJson` field",
+        "Quote clips are enqueued for SCORE_CLIP alongside motion/audio-discovered child clips",
+        "When `'speech'` is NOT in `activityTags`, `analyzeQuoteQuality` is still called during SCORE_CLIP (existing behavior) but NOT during INGEST_CLIP — no duplicate API calls",
+        "The existing behavior of running `analyzeQuoteQuality` in SCORE_CLIP (src/lib/handlers/score-clip.ts, lines ~79-95) is updated to check if quote clips already exist from INGEST_CLIP and skip redundant re-analysis",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Speech quote analysis during INGEST_CLIP is a new pathway — the handler currently only runs transcription during ingest (for transcriptWordsJson on the parent Asset). Quote analysis during SCORE_CLIP currently uses the stored transcript, so duplicating the analysis at ingest time requires careful deduplication logic to avoid double-counting."
+    },
+    {
+      "id": "US-012",
+      "title": "Retain ffmpeg scene detection as one signal source (not primary gate) and ensure child CLIP asset creation is unchanged",
+      "description": "As a pipeline developer, I want ffmpeg scene detection retained as a motion-density signal input to identifyCandidateWindows rather than the primary segmentation gate, and for child CLIP Asset creation to follow the exact same schema pattern used today.",
+      "acceptanceCriteria": [
+        "The `detectScenes` function in `src/lib/video-segmentation.ts` is retained and called at a low threshold (0.1) inside `identifyCandidateWindows` or `analyzeAndSegment` to produce motion density data — NOT as the gate that determines clip boundaries",
+        "The `segmentVideo` function is not deleted; it is marked with a JSDoc `@deprecated` comment noting it has been superseded by AI-first segmentation",
+        "Child CLIP Asset records created by `analyzeAndSegment` have all the same fields as today: `type: 'CLIP'`, `parentAssetId`, `startTimeMs`, `endTimeMs`, `durationSeconds`, `motionLevel` ('LOW'/'MEDIUM'/'HIGH'), `dominantMode` ('ACTION'/'SPEECH'/'MIXED'/'MONTAGE')",
+        "Child CLIP creation uses `prisma.asset.create` with the same field set used in ingest-clip.ts today (no new or missing fields)",
+        "The existing test in `__tests__/clips-child-assets.test.ts` that verifies child asset fields passes without modification",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "This story is tightly coupled with US-010 and should be implemented as part of the same changeset. It's split here for traceability of the specific requirement to retain scene detection as a signal source."
     }
   ]
 }

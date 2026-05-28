@@ -1,0 +1,98 @@
+{
+  "project": "Girls In Sports — Sprint 1: Smart Video Segmentation & Accurate Scoring",
+  "branchName": "dev/sprint1-smart-segmentation",
+  "description": "Vastly improve analysis accuracy and media clipping so every uploaded video is automatically decomposed into meaningful, individually-scored highlight clips before downstream curation or rendering.",
+  "source": "PRD.md (2026-05-24)",
+  "stories": [
+    {
+      "id": "S1-01",
+      "title": "Smart Video Segmentation During Ingest",
+      "acceptance": [
+        "Source videos >20 seconds are segmented into child CLIP Assets during INGEST_CLIP",
+        "Each child Asset has valid parentAssetId, startTimeMs, endTimeMs, durationSeconds, motionLevel, dominantMode",
+        "Child clips are individually queued for SCORE_CLIP jobs",
+        "Original source Asset status set to INGESTING while children process, then SCORED when all children complete",
+        "Videos ≤20 seconds produce a single child clip (passthrough)",
+        "Minimum clip length configurable (default 4s); very short segments merged with adjacent clips",
+        "Maximum clips per source: 20 (configurable); excess segments merged by motion-profile proximity"
+      ],
+      "passes": true,
+      "commit": "188bbe0",
+      "notes": "Implemented idempotency guard, lowered threshold from 60s to 20s, and set motionLevel/dominantMode on child Asset creation. Full smart segmentation (merging by motion profile, speaker-aware boundaries, audio-driven segmentation) is deferred to future refinement."
+    },
+    {
+      "id": "S1-02",
+      "title": "Dual-Path Transcription with Venice Beta Primary + Whisper Fallback",
+      "acceptance": [
+        "transcribeVideo() tries Venice beta /audio/transcribe first",
+        "If beta succeeds with diarized segments: speaker labels stored alongside transcript words",
+        "Coach-speaker heuristic: directive words + longer utterances classified as coach",
+        "If beta fails: fall back to Whisper /audio/transcriptions (current behavior preserved)",
+        "Fallback logged with quality flag transcriptionFallback: true",
+        "Diarized speaker info feeds into audioScore: coach-identified speech weighted 2× vs unidentified",
+        "Quality flag records transcriptionProvider: venice-beta | whisper-fallback"
+      ],
+      "passes": true,
+      "commit": "aeee6df",
+      "notes": "Implemented dual-path: primary call requests diarization via diarize=true/diarize_audio=true params. Parses speaker segments from Venice response. If no speaker segments returned, falls back to standard Whisper. Coach weighting implemented in computeAudioScore: keyword matches in coach-identified speakerSegments get +1× bonus. transcriptWordsJson persisted on Asset. transcriptionProvider and speakerSegmentsJson stored in ClipScore."
+    },
+    {
+      "id": "S1-03",
+      "title": "Transcript-Driven Speech Clip Segmentation",
+      "acceptance": [
+        "STT word-level timestamps + motion LOW for ≥3s activates speech segmentation mode",
+        "Sentence-boundary detection (silence gaps ≥0.8s or punctuation) defines clip boundaries",
+        "Diarized speaker changes trigger segment boundaries",
+        "Each speech clip carries transcriptExcerpt scoped to its time window",
+        "Speech clips classified as ClipType.SPEECH",
+        "Audio signal score applied at 70% for SPEECH clips (vs 30% visual)"
+      ],
+      "passes": true,
+      "commit": "df7c97a",
+      "notes": "Implemented in ingest-clip.ts: runs transcription on source video, stores full transcriptWordsJson on parent Asset. mergeSegmentBoundaries() merges ffmpeg scene cuts with STT silence gaps (≥0.8s) and speaker changes. Each child Asset gets scoped transcriptWordsJson for its time window. score-clip.ts now reads existing transcriptWordsJson from Asset and reconstructs TranscriptionResult, skipping redundant transcription API calls."
+    },
+    {
+      "id": "S1-04",
+      "title": "Content-Aware Dynamic Frame Sampling",
+      "acceptance": [
+        "ACTION/MIXED clips sampled at 3 fps (capped at 120 frames)",
+        "SPEECH/MONTAGE clips sampled at 1 fps (capped by duration)",
+        "Absolute maximum: 120 frames per clip",
+        "Batch size increased from 3 to 6 frames per Venice API call",
+        "If duration × fps exceeds cap, density reduced proportionally with evenly-spaced coverage",
+        "Frame extraction uses ffmpeg -ss seek with absolute timestamps",
+        "MAX_FRAMES_PER_CLIP configurable via env var (default: 120)"
+      ],
+      "passes": true,
+      "commit": "927f003",
+      "notes": "Replaced fixed frame counts with tiered FPS strategy: ACTION/MIXED at 3 fps, everything else at 1 fps. frameCount = min(duration × fps, MAX_FRAMES_PER_CLIP). If capped, interval = duration / frameCount for evenly-spaced coverage. batchSize increased from 3 to 6 in analyzeKeyframesWithVision. extractKeyframes now accepts interval parameter instead of computing internally."
+    },
+    {
+      "id": "S1-05",
+      "title": "Audio-Signal Rescue & Speech Scoring",
+      "acceptance": [
+        "Low-motion clips with high-signal audio identified and scored with boosted audio weight",
+        "Speech clips use 70/30 audio/visual weight split",
+        "Coach speech segments weighted 2× vs background speech",
+        "Crowd roar / celebration detected via audio energy peaks",
+        "Audio-driven composite score computed independently from motion score"
+      ],
+      "passes": true,
+      "commit": "0de6ff0",
+      "notes": "Added detectCrowdRoar() using ffmpeg volumedetect filter — mean > -15dB or max > -3dB triggers hasCrowdRoar. SPEECH clips now bypass tiered scoring and use 70/30 audio/production weight split. Low-motion (<30) + high-audio (>50 or hasCrowdRoar) clips get audioSignalRescue=true and clipType promoted to MIXED. hasCrowdRoar and audioSignalRescue fields added to ClipScore schema and Immich tags."
+    },
+    {
+      "id": "S1-06",
+      "title": "User-Selectable Music Model",
+      "acceptance": [
+        "Campaign creation UI shows music model selector: minimax-music-v26 (default), elevenlabs-music [expensive - $1.25], minimax-music-v2, minimax-music-v25",
+        "Model selection stored in Campaign.musicModel",
+        "generate-music.ts reads Campaign.musicModel and calls correct endpoint",
+        "If selected model fails, fallback to minimax-music-v26 (never ace-step)"
+      ],
+      "passes": true,
+      "commit": "b40b434",
+      "notes": "Campaign schema already had musicModelPreference field. UI added pill selector in event page Creative Brief panel with 4 models. API validates against allowlist and defaults to minimax-music-v26. generate-music.ts reads campaign.musicModelPreference, tries that model first, falls back to minimax-music-v26 on failure. Removed old hardcoded elevenlabs-music → ace-step fallback."
+    }
+  ]
+}
