@@ -11,7 +11,6 @@ import { transcribeVideo, TranscriptionResult } from "../transcription";
 // US-014: centralized quality flag + error recording (graceful degradation, circuit breaker, user-visible messages)
 import { createLogger } from "../logger";
 import { recordQualityFlags, markPartialSuccess, recordJobError } from "./quality-tracking";
-import { enqueueJob, JobType } from "../job-worker";
 // S1-06: AI interestingness — temporal window scoring + quote quality analysis
 import {
   analyzeTemporalInterestingness,
@@ -378,7 +377,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
         });
         if (exists) continue;
 
-        const childAsset = await prisma.asset.create({
+        await prisma.asset.create({
           data: {
             eventId,
             type: "CLIP",
@@ -390,15 +389,6 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
             motionLevel: "LOW",
             dominantMode: "SPEECH",
           },
-        });
-
-        // Enqueue scoring for the quote-segment child clip
-        await enqueueJob(JobType.SCORE_CLIP, {
-          assetId: childAsset.id,
-          immichAssetId,
-          eventId,
-          eventName: asset.event?.name,
-          activityTags,
         });
       }
     }
