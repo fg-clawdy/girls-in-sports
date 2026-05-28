@@ -31,8 +31,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-28. New file src/lib/activity-tags.ts exports ActivityTag type, ACTIVITY_CONTEXT map, ACTIVITY_TAG_VALUES allowlist, and buildVisionPrompt(). All criteria verified. Commit: 0997821"
     },
     {
       "id": "US-003",
