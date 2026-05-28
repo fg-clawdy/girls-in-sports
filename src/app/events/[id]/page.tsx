@@ -16,6 +16,7 @@ interface EventData {
   thumbnailUrl?: string | null;
   immichAlbumId: string | null;
   qualityTier: "AMATEUR" | "INTERMEDIATE" | "PROFESSIONAL";
+  activityTags?: string[];
 }
 
 interface ImmichAsset {
@@ -627,13 +628,22 @@ export default function EventPage() {
               Edit Event
             </button>
           </div>
-          <div className="flex items-center gap-3 mt-2 text-sm text-zinc-600">
+          <div className="flex items-center gap-3 mt-2 text-sm text-zinc-600 flex-wrap">
             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium">
               {event.sport}
             </span>
             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-green-50 text-green-700 font-medium">
               {event.city}
             </span>
+            {event.activityTags && event.activityTags.length > 0 &&
+              event.activityTags.map((tag) => (
+                <span
+                  key={tag}
+                  className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-[var(--accent)]/10 text-[var(--accent)] font-medium"
+                >
+                  {tag.charAt(0).toUpperCase() + tag.slice(1)}
+                </span>
+              ))}
             <span>
               {new Date(event.eventDate).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
             </span>

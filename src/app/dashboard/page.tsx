@@ -24,6 +24,7 @@ interface EventItem {
   sport: string;
   status: string;
   createdAt: string;
+  activityTags?: string[];
 }
 
 interface CampaignItem {
@@ -82,14 +83,14 @@ export default function DashboardPage() {
 
   // Create Event modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createForm, setCreateForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "" });
+  const [createForm, setCreateForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "", activityTags: ["sports"] });
   const [createLoading, setCreateLoading] = useState(false);
   const [createError, setCreateError] = useState("");
 
   // Edit Event modal state
   const [showEditModal, setShowEditModal] = useState(false);
   const [editEvent, setEditEvent] = useState<EventItem | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "" });
+  const [editForm, setEditForm] = useState({ name: "", sport: "", city: "", eventDate: "", description: "", activityTags: [] as string[] });
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState("");
 
@@ -138,6 +139,10 @@ export default function DashboardPage() {
   // ── Create Event ──────────────────────────────────────
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (createForm.activityTags.length === 0) {
+      setCreateError("Please select at least one activity type");
+      return;
+    }
     setCreateLoading(true);
     setCreateError("");
     try {
@@ -150,7 +155,7 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error(data.error || "Failed to create event");
       const newEventId = data.event.id;
       setShowCreateModal(false);
-      setCreateForm({ name: "", sport: "", city: "", eventDate: "", description: "" });
+      setCreateForm({ name: "", sport: "", city: "", eventDate: "", description: "", activityTags: ["sports"] });
       router.push(`/events/${newEventId}`);
     } catch (err: any) {
       setCreateError(err.message);
@@ -162,7 +167,7 @@ export default function DashboardPage() {
   // ── Edit Event ──────────────────────────────────────
   const openEdit = (event: EventItem) => {
     setEditEvent(event);
-    setEditForm({ name: event.name, sport: "", city: "", eventDate: "", description: "" });
+    setEditForm({ name: event.name, sport: "", city: "", eventDate: "", description: "", activityTags: event.activityTags ?? [] });
     setEditError("");
     setShowEditModal(true);
   };
@@ -170,6 +175,10 @@ export default function DashboardPage() {
   const handleEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editEvent) return;
+    if (editForm.activityTags.length === 0) {
+      setEditError("Please select at least one activity type");
+      return;
+    }
     setEditLoading(true);
     setEditError("");
     try {
@@ -501,6 +510,35 @@ export default function DashboardPage() {
                   className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
               </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 mb-2">Activity Type</label>
+                <div className="flex flex-wrap gap-2">
+                  {["sports","party","play","speech"].map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() =>
+                        setCreateForm((p) => ({
+                          ...p,
+                          activityTags: p.activityTags.includes(tag)
+                            ? p.activityTags.filter((t) => t !== tag)
+                            : [...p.activityTags, tag],
+                        }))
+                      }
+                      className={`px-3 py-1 rounded-full text-sm font-medium border transition-colors ${
+                        createForm.activityTags.includes(tag)
+                          ? "bg-[var(--accent)] text-white border-[var(--accent)]"
+                          : "bg-white text-zinc-600 border-zinc-300 hover:border-zinc-400"
+                      }`}
+                    >
+                      {tag.charAt(0).toUpperCase() + tag.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                {createForm.activityTags.length === 0 && (
+                  <p className="text-xs text-red-500 mt-1">Select at least one</p>
+                )}
+              </div>
               {createError && <p className="text-sm text-red-600">{createError}</p>}
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
@@ -574,6 +612,35 @@ export default function DashboardPage() {
                   onChange={(e) => setEditForm((p) => ({ ...p, description: e.target.value }))}
                   className="mt-1 block w-full px-3 py-2 border border-zinc-300 rounded-md text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 mb-2">Activity Type</label>
+                <div className="flex flex-wrap gap-2">
+                  {["sports","party","play","speech"].map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() =>
+                        setEditForm((p) => ({
+                          ...p,
+                          activityTags: p.activityTags.includes(tag)
+                            ? p.activityTags.filter((t) => t !== tag)
+                            : [...p.activityTags, tag],
+                        }))
+                      }
+                      className={`px-3 py-1 rounded-full text-sm font-medium border transition-colors ${
+                        editForm.activityTags.includes(tag)
+                          ? "bg-[var(--accent)] text-white border-[var(--accent)]"
+                          : "bg-white text-zinc-600 border-zinc-300 hover:border-zinc-400"
+                      }`}
+                    >
+                      {tag.charAt(0).toUpperCase() + tag.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                {editForm.activityTags.length === 0 && (
+                  <p className="text-xs text-red-500 mt-1">Select at least one</p>
+                )}
               </div>
               {editError && <p className="text-sm text-red-600">{editError}</p>}
               <div className="flex items-center justify-end gap-3 pt-2">
