@@ -190,3 +190,70 @@ export function waitForExit(
     proc.on("exit", (code, signal) => resolve({ code, signal }));
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Audio Energy Profile (US-008)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export interface AudioEnergyProfile {
+  segments: Array<{ startTime: number; endTime: number; meanDb: number; maxDb: number }>;
+  duration: number;
+}
+
+/**
+ * Compute an audio energy profile for a video using ffmpeg volumedetect.
+ *
+ * MVP implementation: returns a single segment covering the full video duration
+ * with overall mean_volume and max_volume. Per-second windows can be added
+ * in a follow-up using asegment + astats.
+ *
+ * @param videoPath — absolute path to the source video
+ * @returns AudioEnergyProfile with at least one segment and the total duration
+ */
+export async function computeAudioEnergyProfile(videoPath: string): Promise<AudioEnergyProfile> {
+  const logTag = "audio-energy-profile";
+
+  // ── 1. Get duration via ffprobe ──
+  const { proc: probeProc } = spawnLimitedFfprobe(
+    ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath],
+    { logTag: `${logTag}-duration` }
+  );
+
+  const probeOutput = await collectStdout(probeProc);
+  const { code: probeCode } = await waitForExit(probeProc);
+
+  let duration = 0;
+  if (probeCode === 0) {
+    duration = parseFloat(probeOutput.trim()) || 0;
+  }
+
+  if (duration === 0) {
+    return { segments: [], duration: 0 };
+  }
+
+  // ── 2. Run volumedetect on audio stream ──
+  const { proc: volProc } = spawnLimitedFfmpeg(
+    ["-i", videoPath, "-vn", "-af", "volumedetect", "-f", "null", "-"],
+    { nice: 15, timeoutMs: 300_000, logTag: `${logTag}-volumedetect` }
+  );
+
+  const stderr = await collectStderr(volProc);
+  const { code: volCode } = await waitForExit(volProc);
+
+  if (volCode !== 0) {
+    return { segments: [], duration };
+  }
+
+  // Parse mean_volume and max_volume from stderr
+  const meanMatch = stderr.match(/mean_volume:\s*(-?[\d.]+)\s*dB/);
+  const maxMatch = stderr.match(/max_volume:\s*(-?[\d.]+)\s*dB/);
+
+  const meanDb = meanMatch ? parseFloat(meanMatch[1]) : -91;
+  const maxDb = maxMatch ? parseFloat(maxMatch[1]) : -91;
+
+  // MVP: single segment spanning full duration
+  return {
+    segments: [{ startTime: 0, endTime: duration, meanDb, maxDb }],
+    duration,
+  };
+}
