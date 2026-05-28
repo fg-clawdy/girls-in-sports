@@ -1,6 +1,18 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createAlbum, isImmichConfigured } from "@/lib/immich";
+import { ACTIVITY_TAG_VALUES } from "@/lib/activity-tags";
+
+/** Validate activity tags and return a normalized array or a 400 error string */
+function validateActivityTags(raw: unknown): { tags?: string[]; error?: string } {
+  if (raw === undefined || raw === null) return { tags: [] };
+  if (!Array.isArray(raw)) return { error: "activityTags must be an array" };
+  const invalid = raw.filter((t) => typeof t !== "string" || !ACTIVITY_TAG_VALUES.includes(t.toLowerCase()));
+  if (invalid.length > 0) {
+    return { error: `Invalid activity tags: ${invalid.join(", ")}` };
+  }
+  return { tags: raw.map((t: string) => t.toLowerCase()) };
+}
 
 // Force dynamic rendering so newly created events are immediately visible
 // (Next.js route handlers are statically optimized / cached by default)
@@ -9,13 +21,18 @@ export const revalidate = 0;
 
 export async function POST(request: Request) {
   try {
-    const { name, sport, city, eventDate, description } = await request.json();
+    const { name, sport, city, eventDate, description, activityTags } = await request.json();
 
     if (!name || !sport || !city || !eventDate) {
       return NextResponse.json(
         { error: "Name, sport, city, and eventDate are required" },
         { status: 400 }
       );
+    }
+
+    const tagValidation = validateActivityTags(activityTags);
+    if (tagValidation.error) {
+      return NextResponse.json({ error: tagValidation.error }, { status: 400 });
     }
 
     let immichAlbumId: string | null = null;
@@ -44,6 +61,7 @@ export async function POST(request: Request) {
         // Explicit defaults for columns added after initial empty migration
         currentEstimatedCost: 0,
         qualityTier: "PROFESSIONAL",
+        activityTags: tagValidation.tags ?? [],
       },
     });
 
