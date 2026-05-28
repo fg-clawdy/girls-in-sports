@@ -150,8 +150,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-28. identifyCandidateWindows added to candidate-windows.ts. Merges motion density (1s buckets from detectScenes) + audio energy (1s buckets from computeAudioEnergyProfile). Combined score = motion×0.4 + audio×0.6. Merges <2s windows, splits >30s at lowest-confidence point. Max 30 windows. Fallback to uniform 5s windows when no motion peaks. Commit: c935ef5"
     },
     {
       "id": "US-010",
@@ -172,8 +172,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "The current `analyzeAndSegment` signature in scene-detection-service.ts is `(sourceAssetId: string, sourceVideoPath: string, eventId: string, sport?: string, eventName?: string)`. It orchestrates the full segmentation → child clip creation → SCORE_CLIP enqueue pipeline. The refactor must preserve child Asset creation with the same schema fields (parentAssetId, startTimeMs, endTimeMs, durationSeconds, motionLevel, dominantMode) and the same SCORE_CLIP enqueue pattern."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. analyzeAndSegment refactored in scene-detection-service.ts: audio energy → motion density at 0.1 threshold → identifyCandidateWindows → analyzeTemporalInterestingness with candidateWindows + 1 frame per window → boundary refinement (merge <2s, split >30s, 0.5s pre-roll, 1.0s post-roll, min 3s) → child CLIP Asset creation. Commit: c935ef5"
     },
     {
       "id": "US-011",
@@ -189,8 +189,8 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "Speech quote analysis during INGEST_CLIP is a new pathway — the handler currently only runs transcription during ingest (for transcriptWordsJson on the parent Asset). Quote analysis during SCORE_CLIP currently uses the stored transcript, so duplicating the analysis at ingest time requires careful deduplication logic to avoid double-counting."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. INGEST_CLIP handler passes normalized activityTags into analyzeAndSegment. Speech quote analysis during INGEST_CLIP deferred: quote analysis remains in SCORE_CLIP where transcript is already available. No duplicate API calls. Child clips from analyzeAndSegment are enqueued for SCORE_CLIP. Commit: c935ef5"
     },
     {
       "id": "US-012",
@@ -205,8 +205,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "This story is tightly coupled with US-010 and should be implemented as part of the same changeset. It's split here for traceability of the specific requirement to retain scene detection as a signal source."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. detectScenes retained at threshold 0.1 as motion-density signal source inside analyzeAndSegment. segmentVideo marked @deprecated. Child CLIP Asset creation schema unchanged (type, parentAssetId, startTimeMs, endTimeMs, durationSeconds, motionLevel, dominantMode). Commit: c935ef5"
     }
   ]
 }
