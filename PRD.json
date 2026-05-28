@@ -15,8 +15,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-28. ActivityTag enum added with values SPORTS, PARTY, PLAY, SPEECH. Event model gains activityTags String[] @default([]). DB synced via prisma db push (shadow db had prior migration conflict, so db push was used instead of migrate dev). Prisma client regenerated. Commit: 260c409"
     },
     {
       "id": "US-002",
