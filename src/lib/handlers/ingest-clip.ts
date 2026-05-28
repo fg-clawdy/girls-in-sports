@@ -172,6 +172,12 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
 
     // US-014 success path: record that ingest completed (even if some child clips had issues downstream)
     await recordQualityFlags(jobId, "ingest-clip", { failed: false });
+
+    // Mark source video as fully ingested
+    await prisma.asset.update({
+      where: { id: assetId },
+      data: { status: AssetStatus.UPLOADED },
+    });
   } catch (err) {
     // US-014: every failure path now records exact error + quality flag so the
     // user sees a clear message, the circuit breaker can trip, and the worker
