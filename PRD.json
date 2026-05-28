@@ -78,8 +78,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "The fallback inference from `sport` to `activityTags: ['sports']` is a transitional measure and should be logged with a deprecation warning."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. INGEST_CLIP payload gains activityTags. upload/route.ts threads event.activityTags into INGEST_CLIP job payload. ingest-clip.ts reads activityTags from Event record and passes into every SCORE_CLIP enqueue. SCORE_CLIP payload gains activityTags. score-clip.ts prefers payload activityTags over event record (fallback to sport inference). sport/eventName preserved for backward compatibility. Commit: ba01ce9"
     },
     {
       "id": "US-006",
