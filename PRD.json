@@ -94,8 +94,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-28. POST /api/events accepts optional activityTags string[], validates against ACTIVITY_TAG_VALUES allowlist, defaults to empty array. PATCH /api/events/[id] accepts optional activityTags, same validation, omits field if not provided. Invalid tags return 400 with 'Invalid activity tags: <list>'. Commit: 22085e4"
     },
     {
       "id": "US-007",
