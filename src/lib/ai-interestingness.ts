@@ -80,42 +80,52 @@ export async function analyzeTemporalInterestingness(
     framesPerWindow?: number; // default 3
     maxWindows?: number; // default 40 (covers ~5min video at 8s windows)
     activityTags?: ActivityTag[];
+    /** When provided, scores only these candidate windows instead of equal-length windows */
+    candidateWindows?: Array<{ startTime: number; endTime: number }>;
   }
 ): Promise<InterestingnessResult> {
   const windowDuration = options?.windowDuration ?? 8;
   const framesPerWindow = options?.framesPerWindow ?? 3;
   const maxWindows = options?.maxWindows ?? 40;
   const activityTags = options?.activityTags ?? [];
-
-  const totalWindows = Math.min(Math.ceil(duration / windowDuration), maxWindows);
-  if (totalWindows === 0) {
-    return {
-      windows: [
-        {
-          windowIndex: 0,
-          startTime: 0,
-          endTime: duration,
-          interestingnessScore: 50,
-          description: "Clip too short for windowing",
-          hasAction: false,
-          hasEmotion: false,
-          hasPeakMoment: false,
-        },
-      ],
-      topWindowIndices: [0],
-      averageInterestingness: 50,
-      modelUsed: "fallback",
-      totalApiCalls: 0,
-      failedApiCalls: 0,
-    };
-  }
+  const candidateWindows = options?.candidateWindows;
 
   // Build window definitions
-  const windows: Omit<WindowScore, "interestingnessScore" | "description" | "hasAction" | "hasEmotion" | "hasPeakMoment">[] = [];
-  for (let i = 0; i < totalWindows; i++) {
-    const start = i * windowDuration;
-    const end = Math.min((i + 1) * windowDuration, duration);
-    windows.push({ windowIndex: i, startTime: start, endTime: end });
+  let windows: Omit<WindowScore, "interestingnessScore" | "description" | "hasAction" | "hasEmotion" | "hasPeakMoment">[] = [];
+
+  if (candidateWindows && candidateWindows.length > 0) {
+    for (let i = 0; i < candidateWindows.length; i++) {
+      const cw = candidateWindows[i];
+      windows.push({ windowIndex: i, startTime: cw.startTime, endTime: cw.endTime });
+    }
+  } else {
+    const totalWindows = Math.min(Math.ceil(duration / windowDuration), maxWindows);
+    if (totalWindows === 0) {
+      return {
+        windows: [
+          {
+            windowIndex: 0,
+            startTime: 0,
+            endTime: duration,
+            interestingnessScore: 50,
+            description: "Clip too short for windowing",
+            hasAction: false,
+            hasEmotion: false,
+            hasPeakMoment: false,
+          },
+        ],
+        topWindowIndices: [0],
+        averageInterestingness: 50,
+        modelUsed: "fallback",
+        totalApiCalls: 0,
+        failedApiCalls: 0,
+      };
+    }
+    for (let i = 0; i < totalWindows; i++) {
+      const start = i * windowDuration;
+      const end = Math.min((i + 1) * windowDuration, duration);
+      windows.push({ windowIndex: i, startTime: start, endTime: end });
+    }
   }
 
   // Extract frames per window. We batch multiple windows into one API call to reduce latency.

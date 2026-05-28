@@ -515,6 +515,8 @@ export interface SegmentationResult {
  * Usage:
  *   const result = await segmentVideo(localPath, assetId, audioSegments);
  *   result.segments // Array of production-ready clips
+ *
+ * @deprecated Superseded by analyzeAndSegment (AI-first segmentation). Kept for traceability.
  */
 export async function segmentVideo(
   videoPath: string,

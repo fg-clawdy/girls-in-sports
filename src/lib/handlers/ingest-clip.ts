@@ -14,6 +14,8 @@ import {
 import { recordQualityFlags, recordJobError } from "./quality-tracking";
 import { transcribeVideo, TranscriptionResult } from "../transcription";
 import { enqueueJob, JobType } from "../job-worker";
+import { analyzeAndSegment } from "../scene-detection-service";
+import { ActivityTag, ACTIVITY_TAG_VALUES } from "../activity-tags";
 
 interface IngestClipPayload {
   assetId: string;
@@ -127,97 +129,36 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
       console.warn("[ingest-clip] Transcription failed (continuing with scene-only segmentation):", txErr);
     }
 
-    // ── 4. Scene detection + transcript-driven refinement ──
+    // ── 4. AI-first segmentation (US-010) or direct score for short clips ──
     if (durationSeconds > 20) {
-      const rawScenes = await detectScenes(sourcePath, durationSeconds);
-      const mergedBoundaries = txResult
-        ? mergeSegmentBoundaries(rawScenes, txResult, durationSeconds)
-        : rawScenes;
-      const scenes = mergedBoundaries;
-      const event = await prisma.event.findUnique({
-        where: { id: eventId },
-        select: { immichAlbumId: true },
+      // Normalize activityTags to canonical ActivityTag values
+      const normalizedTags: ActivityTag[] = activityTags
+        .map((t) => t.toLowerCase())
+        .filter((t): t is ActivityTag => ACTIVITY_TAG_VALUES.includes(t as ActivityTag));
+
+      const segmentResult = await analyzeAndSegment(
+        assetId,
+        sourcePath,
+        eventId,
+        normalizedTags,
+        immichAssetId
+      );
+
+      // Enqueue SCORE_CLIP for each child clip created by analyzeAndSegment
+      const childClips = await prisma.asset.findMany({
+        where: { parentAssetId: assetId, type: "CLIP" },
+        select: { id: true, immichAssetId: true },
       });
-      const albumId = event?.immichAlbumId || "";
 
-      const clipJobs: Array<{
-        start: number;
-        end: number;
-        clipPath: string;
-        motionLevel: string;
-        dominantMode: string;
-      }> = [];
-
-      for (let i = 0; i < scenes.length; i++) {
-        const { start, end } = scenes[i];
-        const clipPath = join(tmpDir, `clip_${i}.mp4`);
-        await cutClip(sourcePath, clipPath, start, end);
-        const dur = end - start;
-        const motionLevel = dur < 5 ? "HIGH" : dur < 15 ? "MEDIUM" : "LOW";
-        const dominantMode = dur < 5 ? "ACTION" : dur < 20 ? "MIXED" : "SPEECH";
-        clipJobs.push({ start, end, clipPath, motionLevel, dominantMode });
-      }
-
-      // ── 5. Upload clips to Immich + create child Assets (parallel, concurrency 3) ──
-      // Immich uploads are I/O-bound (streaming to host01 SSD over network).
-      // Parallel uploads with concurrency 3 cut total upload time for multi-clip
-      // ingests from N × T to ~ceil(N/3) × T without memory pressure.
-      const UPLOAD_CONCURRENCY = 3;
-      await poolMap(clipJobs, UPLOAD_CONCURRENCY, async (clipJob, i) => {
-        const { start, end, clipPath, motionLevel, dominantMode } = clipJob;
-        const now = new Date().toISOString();
-        const clipName = `clip_${i}_${start.toFixed(2)}-${end.toFixed(2)}.mp4`;
-
-        const uploadedImmichId = await uploadAssetFromFile(
-          clipPath,
-          `${assetId}_clip_${i}`,
-          clipName,
-          now,
-          now,
-          "video/mp4"
-        );
-
-        if (albumId) {
-          await addAssetsToAlbum(albumId, [uploadedImmichId]);
-        }
-
-        // Scope transcript words to this child clip's time window
-        const segTranscriptWords = txResult
-          ? txResult.words
-              .filter((w) => w.start >= start && w.end <= end)
-              .map((w) => ({
-                word: w.word,
-                startMs: Math.round(w.start * 1000),
-                endMs: Math.round(w.end * 1000),
-              }))
-          : [];
-
-        const clipAsset = await prisma.asset.create({
-          data: {
-            eventId,
-            parentAssetId: assetId,
-            immichAssetId: uploadedImmichId,
-            type: "CLIP",
-            status: AssetStatus.UPLOADED,
-            filePath: clipName,
-            durationSeconds: end - start,
-            startTimeMs: Math.round(start * 1000),
-            endTimeMs: Math.round(end * 1000),
-            sizeBytes: (await fs.stat(clipPath)).size,
-            motionLevel,
-            dominantMode,
-            transcriptWordsJson: segTranscriptWords.length > 0 ? (segTranscriptWords as any) : null,
-          },
-        });
-
+      for (const child of childClips) {
         await enqueueJob(JobType.SCORE_CLIP, {
-          assetId: clipAsset.id,
-          immichAssetId: uploadedImmichId,
+          assetId: child.id,
+          immichAssetId: child.immichAssetId,
           eventId,
           eventName: pl.eventName,
           activityTags,
         });
-      });
+      }
     } else {
       // ── Short video: score directly ──
       await enqueueJob(JobType.SCORE_CLIP, {
