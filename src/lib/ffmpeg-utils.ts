@@ -153,8 +153,9 @@ export function spawnLimitedFfprobe(
  * Uses streaming concatenation to avoid buffer bloat where possible,
  * but for small probe output (<10MB) this is fine.
  */
-export function collectStdout(proc: { stdout: NodeJS.ReadableStream }): Promise<string> {
+export function collectStdout(proc: { stdout: NodeJS.ReadableStream | null }): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (!proc.stdout) return resolve("");
     let output = "";
     proc.stdout.on("data", (chunk: Buffer) => {
       output += chunk.toString("utf-8");

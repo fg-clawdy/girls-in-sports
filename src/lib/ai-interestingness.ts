@@ -211,7 +211,7 @@ export async function analyzeTemporalInterestingness(
             windowIndex: w.windowIndex,
             startTime: w.startTime,
             endTime: w.endTime,
-            interestingnessScore: 30, // below threshold, won't be selected
+            interestingnessScore: 50, // above threshold so clip still created when vision fails
             description: "Vision API unavailable — default score",
             hasAction: false,
             hasEmotion: false,

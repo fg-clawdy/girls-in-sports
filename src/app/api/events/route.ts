@@ -7,7 +7,7 @@ import { ACTIVITY_TAG_VALUES } from "@/lib/activity-tags";
 function validateActivityTags(raw: unknown): { tags?: string[]; error?: string } {
   if (raw === undefined || raw === null) return { tags: [] };
   if (!Array.isArray(raw)) return { error: "activityTags must be an array" };
-  const invalid = raw.filter((t) => typeof t !== "string" || !ACTIVITY_TAG_VALUES.includes(t.toLowerCase()));
+  const invalid = raw.filter((t) => typeof t !== "string" || !(ACTIVITY_TAG_VALUES as string[]).includes(t.toLowerCase()));
   if (invalid.length > 0) {
     return { error: `Invalid activity tags: ${invalid.join(", ")}` };
   }

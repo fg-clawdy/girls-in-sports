@@ -128,7 +128,7 @@ export async function analyzeAndSegment(
   // ── 6. Boundary refinement & child CLIP creation ──
   let childClipsCreated = 0;
   const scoredWindows = interestResult.windows
-    .filter((w) => w.interestingnessScore >= 45) // threshold lowered for MVP
+    .filter((w) => w.interestingnessScore >= 25)
     .sort((a, b) => a.startTime - b.startTime);
 
   // Merge adjacent windows within 2s
