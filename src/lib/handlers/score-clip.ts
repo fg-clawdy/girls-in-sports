@@ -112,6 +112,15 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     const sport = asset.event?.sport?.toLowerCase() || "default";
     const eventName = asset.event?.name || "Unknown Event";
 
+    // US-003/005: transitional — read activityTags from event, fallback to sport inference
+    let activityTags: import("../activity-tags").ActivityTag[] = (asset.event?.activityTags as any) ?? [];
+    if (activityTags.length === 0) {
+      // Fallback inference from sport (deprecated — will be removed after UI adoption)
+      if (sport !== "default") {
+        activityTags = ["sports"];
+      }
+    }
+
     // ── 2. Run STT on raw video (dual-path: Venice beta with diarization primary, Whisper fallback)
     let sttResult: TranscriptionResult;
     const existingWords = (asset as any).transcriptWordsJson;
@@ -260,8 +269,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
               windowDuration: 8,
               framesPerWindow: 3,
               maxWindows: Math.min(40, Math.ceil(analysisDuration / 8)),
-              sport,
-              eventName,
+              activityTags,
             }
           );
           log.info({

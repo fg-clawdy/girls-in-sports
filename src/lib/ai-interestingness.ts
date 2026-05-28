@@ -10,6 +10,7 @@
 
 import { readFileSync } from "fs";
 import { createLogger } from "./logger";
+import { ActivityTag, buildVisionPrompt } from "./activity-tags";
 
 const VENICE_API_URL =
   process.env.VISION_API_URL || process.env.VENICE_API_URL || "https://api.venice.ai/api/v1";
@@ -78,15 +79,13 @@ export async function analyzeTemporalInterestingness(
     windowDuration?: number; // default 8 seconds
     framesPerWindow?: number; // default 3
     maxWindows?: number; // default 40 (covers ~5min video at 8s windows)
-    sport?: string;
-    eventName?: string;
+    activityTags?: ActivityTag[];
   }
 ): Promise<InterestingnessResult> {
   const windowDuration = options?.windowDuration ?? 8;
   const framesPerWindow = options?.framesPerWindow ?? 3;
   const maxWindows = options?.maxWindows ?? 40;
-  const sport = options?.sport ?? "youth sports";
-  const eventName = options?.eventName ?? "unknown";
+  const activityTags = options?.activityTags ?? [];
 
   const totalWindows = Math.min(Math.ceil(duration / windowDuration), maxWindows);
   if (totalWindows === 0) {
@@ -190,7 +189,7 @@ export async function analyzeTemporalInterestingness(
 
     for (const batch of batches) {
       totalApiCalls++;
-      const result = await scoreBatchWithVision(batch, sport, eventName);
+      const result = await scoreBatchWithVision(batch, activityTags);
 
       if (result) {
         allWindowScores.push(...result);
@@ -234,32 +233,18 @@ export async function analyzeTemporalInterestingness(
 
 async function scoreBatchWithVision(
   batch: { windowIndex: number; startTime: number; endTime: number; framePaths: string[] }[],
-  sport: string,
-  eventName: string
+  activityTags: ActivityTag[],
 ): Promise<WindowScore[] | null> {
   if (!VENICE_API_KEY) return null;
 
-  const SYSTEM_PROMPT = `You are a youth sports video analyst for Girls In Sports (GIS).
-Your task: For each temporal window (identified by its windowIndex), rate how EXCITING and INTERESTING the content is for a highlights video.
-
-A high score means: peak action, clear emotion, something memorable happening, a moment parents would want to see.
-A low score means: static/uneventful, just walking around, nothing distinctive happening, dead time.
-
-For each window, return:
-- windowIndex (the number provided)
-- interestingnessScore (0-100)
-- description (1 sentence describing what's happening in the video)
-- hasAction (boolean: is there obvious sports action/movement?)
-- hasEmotion (boolean: are faces visible showing joy, effort, celebration?)
-- hasPeakMoment (boolean: is this a peak/critical moment — e.g., jump, splash, goal, celebration, collision?)
-
-Return ONLY a valid JSON array. No markdown, no explanations.`;
+  const SYSTEM_PROMPT = buildVisionPrompt(activityTags);
 
   // Build message content: intro text + images grouped by window
+  const activityDesc = activityTags.length > 0 ? activityTags.join(", ") : "general";
   const content: any[] = [
     {
       type: "text",
-      text: `Analyze ${batch.length} temporal windows from a ${sport} youth sports video at event "${eventName}". Each window is ~8 seconds long. I will show you 3 keyframes per window, labeled by windowIndex. Return JSON with scores for each window.`,
+      text: `Analyze ${batch.length} temporal windows from a ${activityDesc} video. Each window is ~8 seconds long. I will show you 3 keyframes per window, labeled by windowIndex. Return JSON with scores for each window.`,
     },
   ];
 
