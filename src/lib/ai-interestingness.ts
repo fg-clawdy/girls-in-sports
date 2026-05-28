@@ -356,13 +356,11 @@ export async function analyzeQuoteQuality(
   speakerSegments: Array<{ speakerLabel: string; start: number; end: number; text: string }>,
   options?: {
     maxQuotes?: number; // default 5
-    sport?: string;
-    eventName?: string;
+    activityTags?: ActivityTag[];
   }
 ): Promise<QuoteQualityResult> {
   const maxQuotes = options?.maxQuotes ?? 5;
-  const sport = options?.sport ?? "youth sports";
-  const eventName = options?.eventName ?? "unknown";
+  const activityTags = options?.activityTags ?? [];
 
   if (!VENICE_API_KEY || !transcript.trim()) {
     return {
@@ -388,14 +386,16 @@ export async function analyzeQuoteQuality(
     return { quotes: [], topQuoteIndices: [], averageQuoteQuality: 0, modelUsed: "fallback" };
   }
 
-  const SYSTEM_PROMPT = `You are a video editing assistant for Girls In Sports (GIS), a youth sports highlight platform.
-Your task: Identify the most QUOTABLE, MEMORABLE, and IMPACTFUL lines from a transcript of a youth sports video.
+  const activityDesc = activityTags.length > 0 ? activityTags.join(", ") : "general";
+
+  const SYSTEM_PROMPT = `You are a video editing assistant for Girls In Sports (GIS).
+Your task: Identify the most QUOTABLE, MEMORABLE, and IMPACTFUL lines from a transcript.
 
 Criteria for a great quotable line:
 - Emotional impact: inspirational, funny, or touching
 - Brevity: short, punchy, easy to remember
 - Authenticity: sounds genuine, not generic
-- Relevance: captures the spirit of youth sports — encouragement, teamwork, coaching wisdom, joy
+- Relevance: captures the spirit of the event type described below
 - Action-driving: lines that would make a great voiceover or text overlay in a highlight reel
 
 Avoid: generic filler ("good job", "nice"), long rambling sentences, unclear/inaudible speech.
@@ -425,7 +425,7 @@ Return the top ${maxQuotes} quotes, sorted by quoteQualityScore descending. Retu
           { role: "system", content: SYSTEM_PROMPT },
           {
             role: "user",
-            content: `Analyze this youth sports video transcript from a ${sport} event "${eventName}". Find the ${maxQuotes} most quotable lines.\n\nTranscript:\n${structuredTranscript}`,
+            content: `Analyze this video transcript from a ${activityDesc} event. Find the ${maxQuotes} most quotable lines.\n\nTranscript:\n${structuredTranscript}`,
           },
         ],
         max_tokens: 1200,

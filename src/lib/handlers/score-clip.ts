@@ -292,8 +292,7 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
             speakerSegments.map((s) => ({ speakerLabel: s.speakerLabel, start: s.start, end: s.end, text: s.text })),
             {
               maxQuotes: 5,
-              sport,
-              eventName,
+              activityTags,
             }
           );
           log.info({

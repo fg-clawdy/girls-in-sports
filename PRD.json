@@ -47,8 +47,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "The exact current prompt string spans roughly lines 7-85 of ai-interestingness.ts. The replacement must preserve the 3-frame window group structure and the 0-100 scoring dimensions."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. analyzeTemporalInterestingness now accepts activityTags: ActivityTag[] instead of sport/eventName. scoreBatchWithVision uses buildVisionPrompt(activityTags) for the system prompt. score-clip.ts reads activityTags from event record (fallback to ['sports'] from sport field). 3-frame window group structure and 0-100 scoring dimensions preserved. Commit: d66495f"
     },
     {
       "id": "US-004",
