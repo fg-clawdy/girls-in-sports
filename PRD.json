@@ -112,8 +112,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "The current `createForm` state is defined on line 85 of dashboard/page.tsx with fields { name, sport, city, eventDate, description }. Tailwind classes for pills can follow the existing accent/color pattern used throughout the UI. The event detail page at src/app/events/[id]/page.tsx will need minor addition to render activity tags."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. Dashboard create/edit modals gain Activity Type pill selector (sports/party/play/speech) with toggle buttons and client-side validation requiring at least one tag. createForm defaults to ['sports']; editForm pre-populates from event.activityTags. Event detail page renders tags as colored pill badges. Commits: 914c0be"
     },
     {
       "id": "US-008",
