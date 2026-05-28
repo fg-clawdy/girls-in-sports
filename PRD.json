@@ -130,8 +130,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "volumedetect does not natively produce per-second windows. Implement by segmenting the audio stream with `asegment` and then applying `astats` per segment, OR by running volumedetect on the full stream and post-processing the single mean/max values as a single-segment profile for MVP. The acceptance criteria allow a simplified initial implementation where the full-video mean/max is treated as one segment — refine to per-second windows in a follow-up if needed."
+      "passes": true,
+      "notes": "Implemented 2026-05-28. computeAudioEnergyProfile added to ffmpeg-utils.ts. MVP: single segment with overall mean_volume and max_volume via ffprobe + volumedetect. Duration from ffprobe. Returns empty profile on failure. nice=15, timeout=300_000. Commit: 141c5bf"
     },
     {
       "id": "US-009",
