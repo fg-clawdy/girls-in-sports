@@ -144,6 +144,7 @@ export async function POST(
           eventId: params.id,
           eventName: event.name,
           fileName: file.name,
+          activityTags: (event.activityTags as string[]) ?? [],
         });
 
         results.push({

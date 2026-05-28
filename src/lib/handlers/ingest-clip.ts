@@ -21,6 +21,7 @@ interface IngestClipPayload {
   eventId: string;
   eventName?: string;
   fileName?: string;
+  activityTags?: string[];
 }
 
 const TMP_BASE = "/tmp/gis";
@@ -86,6 +87,13 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
       where: { id: assetId },
       select: { type: true },
     });
+
+    // ── US-005: read activityTags from Event record ──
+    const eventRecord = await prisma.event.findUnique({
+      where: { id: eventId },
+      select: { activityTags: true },
+    });
+    const activityTags: string[] = (eventRecord?.activityTags as any) ?? [];
 
     // Images: skip scene detection and scoring entirely
     if (asset?.type === "SOURCE_IMAGE") {
@@ -207,6 +215,7 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
           immichAssetId: uploadedImmichId,
           eventId,
           eventName: pl.eventName,
+          activityTags,
         });
       });
     } else {
@@ -216,6 +225,7 @@ export async function handleIngestClip(args: { payload: unknown; jobId: string }
         immichAssetId,
         eventId,
         eventName: pl.eventName,
+        activityTags,
       });
     }
 

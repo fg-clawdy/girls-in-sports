@@ -25,6 +25,7 @@ interface ScoreClipPayload {
   eventId: string;
   eventName?: string;
   parentJobId?: string | null;
+  activityTags?: string[];
 }
 
 const TMP_BASE = "/tmp/gis/score";
@@ -112,8 +113,11 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     const sport = asset.event?.sport?.toLowerCase() || "default";
     const eventName = asset.event?.name || "Unknown Event";
 
-    // US-003/005: transitional — read activityTags from event, fallback to sport inference
-    let activityTags: import("../activity-tags").ActivityTag[] = (asset.event?.activityTags as any) ?? [];
+    // US-005: prefer activityTags from job payload (threaded from INGEST_CLIP), fallback to event record
+    let activityTags: import("../activity-tags").ActivityTag[] = (pl.activityTags as any) ?? [];
+    if (activityTags.length === 0) {
+      activityTags = (asset.event?.activityTags as any) ?? [];
+    }
     if (activityTags.length === 0) {
       // Fallback inference from sport (deprecated — will be removed after UI adoption)
       if (sport !== "default") {
