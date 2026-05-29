@@ -184,7 +184,6 @@ function VideoPlayer({
   endTimeMs?: number;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -202,7 +201,6 @@ function VideoPlayer({
     if (videoRef.current.currentTime * 1000 >= endTimeMs) {
       videoRef.current.pause();
       videoRef.current.currentTime = endTimeMs / 1000;
-      setPlaying(false);
     }
   };
 
@@ -245,8 +243,6 @@ function VideoPlayer({
         className="w-full max-h-[60vh] object-contain"
         onLoadedMetadata={handleLoadedMetadata}
         onTimeUpdate={handleTimeUpdate}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
         onError={() => { setLoading(false); setError(true); }}
       />
     </div>
@@ -1239,7 +1235,8 @@ export default function EventPage() {
 
                           <div className="flex items-center gap-2 pt-1">
                             <button
-                              onClick={() => toggleAccept(clip.id)}
+                              onClick={(e) => { e.stopPropagation(); toggleAccept(clip.id); }}
+                              aria-label={accepted ? "Accepted — click to reject" : "Rejected — click to accept"}
                               className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors ${
                                 accepted
                                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
@@ -1249,7 +1246,8 @@ export default function EventPage() {
                               {accepted ? "Accepted" : "Rejected"}
                             </button>
                             <button
-                              onClick={() => toggleMustInclude(clip.id)}
+                              onClick={(e) => { e.stopPropagation(); toggleMustInclude(clip.id); }}
+                              aria-label="Toggle must-include star"
                               title="Must Include"
                               className={`px-2 py-1.5 rounded-md text-xs font-bold border transition-colors ${
                                 must
@@ -1270,7 +1268,8 @@ export default function EventPage() {
                               🗑
                             </button>
                             <button
-                              onClick={() => setAsThumbnail(clip.id)}
+                              onClick={(e) => { e.stopPropagation(); setAsThumbnail(clip.id); }}
+                              aria-label="Set as thumbnail"
                               title="Set as thumbnail"
                               className={`px-2 py-1.5 rounded-md text-xs font-bold border transition-colors bg-white text-zinc-400 border-zinc-200 hover:text-blue-600`}
                             >
@@ -1739,10 +1738,7 @@ export default function EventPage() {
             {/* Actions */}
             <div className="px-6 py-4 border-t border-zinc-200 flex flex-wrap gap-2">
               <button
-                onClick={() => {
-                  toggleAccept(activeClip.id);
-                  setActiveClip((prev) => prev ? { ...prev } : prev);
-                }}
+                onClick={() => toggleAccept(activeClip.id)}
                 className={`flex-1 min-w-[100px] py-2.5 rounded-md text-sm font-semibold transition-colors ${
                   (acceptedMap[activeClip.id] ?? false)
                     ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
@@ -1752,10 +1748,7 @@ export default function EventPage() {
                 {(acceptedMap[activeClip.id] ?? false) ? "✓ Accepted" : "Rejected"}
               </button>
               <button
-                onClick={() => {
-                  toggleMustInclude(activeClip.id);
-                  setActiveClip((prev) => prev ? { ...prev } : prev);
-                }}
+                onClick={() => toggleMustInclude(activeClip.id)}
                 className={`px-4 py-2.5 rounded-md text-sm font-bold border transition-colors ${
                   (mustIncludeMap[activeClip.id] ?? false)
                     ? "bg-amber-50 text-amber-700 border-amber-300"
