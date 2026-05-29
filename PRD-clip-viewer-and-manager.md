@@ -187,7 +187,7 @@ if (existing) skip creation; // don't create duplicates
 ---
 
 ## Status
-- [ ] US-001: Watch Scored Clips
+- [x] US-001: Watch Scored Clips ✓ (commit fee7679)
 - [ ] US-002: Score Explanation
-- [ ] US-003: Duplicate & Overlapping Segment Detection
+- [x] US-003: Duplicate & Overlapping Segment Detection ✓ (commit 1748b01)
 - [ ] US-004: Remove Clips
