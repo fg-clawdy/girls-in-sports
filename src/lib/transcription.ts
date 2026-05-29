@@ -25,16 +25,31 @@ export async function transcribeVideo(videoPath: string): Promise<TranscriptionR
   await extractAudioToWav(videoPath, audioPath);
 
   try {
-    const primary = await tryTranscribe(audioPath, { diarize: true });
-    if (primary.speakerSegments.length > 0) {
-      return { ...primary, provider: "venice-beta" };
+    try {
+      const primary = await tryTranscribe(audioPath, { diarize: true });
+      if (primary.speakerSegments.length > 0) {
+        return { ...primary, provider: "venice-beta" };
+      }
+      const fallback = await tryTranscribe(audioPath, { diarize: false });
+      return {
+        ...fallback,
+        provider: "whisper-fallback",
+        fallbackReason: "diarization_unavailable",
+      };
+    } catch (err) {
+      // API failure (402, 429, 5xx, timeout) — don't fail the whole scoring pipeline.
+      // Return empty transcript so visual scoring can continue.
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn("[transcribeVideo] API call failed — returning empty transcript:", reason);
+      return {
+        transcript: "",
+        segments: [],
+        words: [],
+        speakerSegments: [],
+        provider: "whisper-fallback",
+        fallbackReason: reason,
+      };
     }
-    const fallback = await tryTranscribe(audioPath, { diarize: false });
-    return {
-      ...fallback,
-      provider: "whisper-fallback",
-      fallbackReason: "diarization_unavailable",
-    };
   } finally {
     try { await fs.unlink(audioPath); } catch { /* ignore */ }
   }

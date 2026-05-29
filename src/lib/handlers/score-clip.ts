@@ -896,12 +896,18 @@ async function cutWindow(
   start: number,
   end: number
 ): Promise<void> {
+  if (end <= start) {
+    throw new Error(`cutWindow: invalid window [${start}, ${end}] — end must be greater than start`);
+  }
   const CUT_TIMEOUT_MS = 120_000;
   const { proc } = spawnLimitedFfmpeg([
     "-ss", start.toFixed(3),
-    "-to", end.toFixed(3),
     "-i", sourcePath,
-    "-c", "copy",
+    "-t", (end - start).toFixed(3),
+    "-c:v", "libx264",
+    "-c:a", "aac",
+    "-preset", "fast",
+    "-avoid_negative_ts", "make_zero",
     "-y",
     outputPath,
   ], { nice: 15, timeoutMs: CUT_TIMEOUT_MS, logTag: "score-clip:cutWindow" });

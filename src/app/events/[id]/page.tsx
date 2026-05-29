@@ -53,6 +53,11 @@ interface ClipData {
     audioScore: number | null;
     motionScore: number | null;
     transcriptExcerpt: string | null;
+    hasFaces: boolean | null;
+    hasCoachSpeech: boolean | null;
+    hasActionKeyword: boolean | null;
+    hasCrowdRoar: boolean | null;
+    scoreExplanation: string | null;
   } | null;
   tieredScore?: number;
   tieredPasses?: boolean;
@@ -62,6 +67,7 @@ interface ClipData {
   endTimeMs?: number | null;
   heightPx?: number | null;
   widthPx?: number | null;
+  parentImmichAssetId?: string | null; // fetched via parentAsset relation
 }
 
 interface JobItem {
@@ -150,6 +156,101 @@ function scoreBadgeColor(score: number | null) {
   if (score >= 70) return "bg-emerald-100 text-emerald-700 border-emerald-300";
   if (score >= 40) return "bg-amber-100 text-amber-700 border-amber-300";
   return "bg-red-100 text-red-700 border-red-300";
+}
+
+function ScoreBar({ label, value }: { label: string; value: number }) {
+  const pct = Math.min(100, Math.max(0, value));
+  const color = pct >= 70 ? "bg-emerald-500" : pct >= 40 ? "bg-amber-500" : "bg-red-500";
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex justify-between items-center">
+        <span className="text-xs font-medium text-zinc-600">{label}</span>
+        <span className="text-xs font-bold text-zinc-800">{value.toFixed(0)}</span>
+      </div>
+      <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+        <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function VideoPlayer({
+  src,
+  startTimeMs,
+  endTimeMs,
+}: {
+  src: string;
+  startTimeMs?: number;
+  endTimeMs?: number;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  // Seek to start when metadata loads
+  const handleLoadedMetadata = () => {
+    setLoading(false);
+    if (videoRef.current && startTimeMs != null) {
+      videoRef.current.currentTime = startTimeMs / 1000;
+    }
+  };
+
+  // Stop at endTimeMs
+  const handleTimeUpdate = () => {
+    if (!videoRef.current || endTimeMs == null) return;
+    if (videoRef.current.currentTime * 1000 >= endTimeMs) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = endTimeMs / 1000;
+      setPlaying(false);
+    }
+  };
+
+  // Toggle play/pause on Space key when modal is open
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === " " && e.target === e.currentTarget) {
+      e.preventDefault();
+      if (videoRef.current) {
+        if (videoRef.current.paused) {
+          videoRef.current.play().catch(() => {});
+        } else {
+          videoRef.current.pause();
+        }
+      }
+    }
+  };
+
+  return (
+    <div className="relative w-full" onKeyDown={handleKeyDown} tabIndex={0}>
+      {/* Loading spinner */}
+      {loading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black z-10">
+          <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+        </div>
+      )}
+      {/* Error state */}
+      {error && (
+        <div className="w-full aspect-video flex items-center justify-center text-zinc-400">
+          <div className="text-center">
+            <p>Source video unavailable</p>
+            <p className="text-xs text-zinc-500 mt-1">The Immich asset could not be loaded.</p>
+          </div>
+        </div>
+      )}
+      <video
+        ref={videoRef}
+        src={src}
+        controls
+        autoPlay
+        className="w-full max-h-[60vh] object-contain"
+        onLoadedMetadata={handleLoadedMetadata}
+        onTimeUpdate={handleTimeUpdate}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onError={() => { setLoading(false); setError(true); }}
+      />
+    </div>
+  );
 }
 
 function getStatusBadge(status: string) {
@@ -255,6 +356,43 @@ export default function EventPage() {
   // ── Delete Asset ──
   const [deleteTarget, setDeleteTarget] = useState<{ assetId: string; fileName: string } | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+
+  // ── Clip Viewer Modal ──
+  const [activeClip, setActiveClip] = useState<ClipData | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<{ id: string; label: string } | null>(null);
+  const [removeLoading, setRemoveLoading] = useState(false);
+
+  const openClipViewer = (clip: ClipData) => {
+    setActiveClip(clip);
+  };
+
+  const handleRemoveClip = async () => {
+    if (!removeTarget) return;
+    setRemoveLoading(true);
+    try {
+      const res = await fetch(`/api/events/${eventId}/assets/${removeTarget.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("Remove failed");
+      setRemoveTarget(null);
+      setActiveClip(null);
+      await fetchClips();
+    } catch (err: any) {
+      alert("Failed to remove clip: " + err.message);
+    } finally {
+      setRemoveLoading(false);
+    }
+  };
+
+  // Keyboard shortcuts for clip viewer
+  useEffect(() => {
+    if (!activeClip) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setActiveClip(null);
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [activeClip]);
 
   // ── Data fetching ──
 
@@ -999,8 +1137,11 @@ export default function EventPage() {
                           accepted ? "border-zinc-200" : "border-zinc-200 opacity-60"
                         }`}
                       >
-                        {/* Thumbnail */}
-                        <div className="aspect-video relative bg-zinc-100">
+                        {/* Thumbnail — click to open viewer */}
+                        <div
+                          className="aspect-video relative bg-zinc-100 cursor-pointer group"
+                          onClick={() => openClipViewer(clip)}
+                        >
                           {clip.immichAssetId ? (
                             <img
                               src={`/api/immich/thumbnail/${clip.immichAssetId}`}
@@ -1010,9 +1151,16 @@ export default function EventPage() {
                             />
                           ) : (
                             <div className="w-full h-full flex items-center justify-center text-zinc-400 text-sm">
-                              No thumbnail
+                              <svg className="w-10 h-10 text-zinc-300 group-hover:text-white transition-colors" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z" />
+                              </svg>
                             </div>
                           )}
+                          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                            <svg className="w-12 h-12 text-white/70 group-hover:text-white/90 transition-all opacity-0 group-hover:opacity-100" fill="currentColor" viewBox="0 0 24 24">
+                              <path d="M8 5v14l11-7z" />
+                            </svg>
+                          </div>
                           {score !== null && (
                             <span
                               className={`absolute top-2 left-2 px-2 py-0.5 rounded text-xs font-bold border ${scoreBadgeColor(
@@ -1110,6 +1258,16 @@ export default function EventPage() {
                               }`}
                             >
                               &#9733;
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRemoveTarget({ id: clip.id, label: `${clip.type === "CLIP" ? "SCENE" : clip.clipScore?.clipType ?? "Clip"} at ${((clip.startTimeMs ?? 0) / 1000).toFixed(1)}s` });
+                              }}
+                              title="Remove clip"
+                              className={`px-2 py-1.5 rounded-md text-xs font-bold border transition-colors bg-white text-zinc-400 border-zinc-200 hover:text-red-600 hover:border-red-300`}
+                            >
+                              🗑
                             </button>
                             <button
                               onClick={() => setAsThumbnail(clip.id)}
@@ -1427,7 +1585,7 @@ export default function EventPage() {
         </div>
       )}
 
-      {/* ── Delete Confirmation Modal ── */}
+      {/* ── Delete Confirmation Modal (for All Media section) ── */}
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/50" onClick={() => setDeleteTarget(null)} />
@@ -1452,6 +1610,208 @@ export default function EventPage() {
                 Remove
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Clip Viewer Modal ── */}
+      {activeClip && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          onClick={() => setActiveClip(null)}
+        >
+          <div className="absolute inset-0 bg-black/90" />
+          <div
+            className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[95vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200">
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-900">
+                  {activeClip.type === "CLIP" ? "SCENE" : activeClip.clipScore?.clipType ?? "Clip"}
+                  {activeClip.startTimeMs != null && ` at ${(activeClip.startTimeMs / 1000).toFixed(1)}s`}
+                </h2>
+                {activeClip.clipScore && (
+                  <div className="flex items-center gap-3 mt-1">
+                    <span className={`px-2 py-0.5 rounded text-sm font-bold border ${scoreBadgeColor(activeClip.tieredScore ?? 0)}`}>
+                      {activeClip.tieredScore?.toFixed(1) ?? "—"} {event?.qualityTier ?? ""}
+                    </span>
+                    <span className="text-xs text-zinc-500">
+                      {activeClip.clipScore.momentScore != null ? `M:${activeClip.clipScore.momentScore.toFixed(0)}` : ""}
+                      {activeClip.clipScore.productionScore != null ? ` P:${activeClip.clipScore.productionScore.toFixed(0)}` : ""}
+                    </span>
+                    {activeClip.durationSeconds && (
+                      <span className="text-xs text-zinc-400">
+                        {activeClip.durationSeconds.toFixed(1)}s · {activeClip.widthPx ?? "?"}×{activeClip.heightPx ?? "?"}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => setActiveClip(null)}
+                className="text-zinc-400 hover:text-zinc-700 text-2xl leading-none px-2"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Video Player */}
+            <div className="bg-black">
+              {activeClip.parentImmichAssetId ? (
+                <VideoPlayer
+                  src={`/api/immich/assets/${activeClip.parentImmichAssetId}`}
+                  startTimeMs={activeClip.type === "CLIP" ? activeClip.startTimeMs ?? 0 : undefined}
+                  endTimeMs={activeClip.type === "CLIP" ? activeClip.endTimeMs ?? undefined : undefined}
+                />
+              ) : (
+                <div className="w-full aspect-video flex items-center justify-center text-zinc-500">
+                  <div className="text-center">
+                    <p>No video source available</p>
+                    <p className="text-xs text-zinc-400 mt-1">
+                      {activeClip.parentAssetId
+                        ? "Parent source video not found in Immich"
+                        : "Clip has no source video"}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Score Breakdown */}
+            {activeClip.clipScore && (
+              <div className="px-6 py-4 border-t border-zinc-100">
+                <h3 className="text-sm font-semibold text-zinc-700 mb-3">Score Breakdown</h3>
+                <div className="grid grid-cols-3 gap-3">
+                  {activeClip.clipScore.visionScore != null && (
+                    <ScoreBar label="Vision" value={activeClip.clipScore.visionScore} />
+                  )}
+                  {activeClip.clipScore.audioScore != null && (
+                    <ScoreBar label="Audio" value={activeClip.clipScore.audioScore} />
+                  )}
+                  {activeClip.clipScore.motionScore != null && (
+                    <ScoreBar label="Motion" value={activeClip.clipScore.motionScore} />
+                  )}
+                </div>
+
+                {/* Signals row */}
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {activeClip.clipScore.hasFaces && <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 text-xs">👤 Faces</span>}
+                  {activeClip.clipScore.hasCoachSpeech && <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 text-xs">🎙 Coach Speech</span>}
+                  {activeClip.clipScore.hasActionKeyword && <span className="px-2 py-1 rounded bg-violet-50 text-violet-700 text-xs">⚡ Action</span>}
+                  {activeClip.clipScore.hasCrowdRoar && <span className="px-2 py-1 rounded bg-amber-50 text-amber-700 text-xs">📣 Crowd Roar</span>}
+                  {activeClip.clipScore.clipType && (
+                    <span className="px-2 py-1 rounded bg-zinc-100 text-zinc-600 text-xs">{activeClip.clipScore.clipType}</span>
+                  )}
+                </div>
+
+                {/* Score Explanation */}
+                {activeClip.clipScore.scoreExplanation && (
+                  <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                    <p className="text-xs font-semibold text-blue-700 mb-1">Why this score?</p>
+                    <p className="text-sm text-blue-900">{activeClip.clipScore.scoreExplanation}</p>
+                  </div>
+                )}
+
+                {/* Transcript */}
+                {activeClip.clipScore.transcriptExcerpt && (
+                  <div className="mt-3">
+                    <p className="text-xs font-semibold text-zinc-500 mb-1">Transcript</p>
+                    <p className="text-sm text-zinc-700 italic">&ldquo;{activeClip.clipScore.transcriptExcerpt}&rdquo;</p>
+                  </div>
+                )}
+
+                {/* Tags */}
+                {activeClip.assetTags.length > 0 && (
+                  <div className="mt-3">
+                    <p className="text-xs font-semibold text-zinc-500 mb-1">Tags</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {activeClip.assetTags.map((t) => (
+                        <span key={t.tag} className="px-2 py-0.5 rounded bg-zinc-100 text-zinc-600 text-xs">{t.tag}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="px-6 py-4 border-t border-zinc-200 flex flex-wrap gap-2">
+              <button
+                onClick={() => {
+                  toggleAccept(activeClip.id);
+                  setActiveClip((prev) => prev ? { ...prev } : prev);
+                }}
+                className={`flex-1 min-w-[100px] py-2.5 rounded-md text-sm font-semibold transition-colors ${
+                  (acceptedMap[activeClip.id] ?? false)
+                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+                    : "bg-zinc-100 text-zinc-500 border border-zinc-200 hover:bg-zinc-200"
+                }`}
+              >
+                {(acceptedMap[activeClip.id] ?? false) ? "✓ Accepted" : "Rejected"}
+              </button>
+              <button
+                onClick={() => {
+                  toggleMustInclude(activeClip.id);
+                  setActiveClip((prev) => prev ? { ...prev } : prev);
+                }}
+                className={`px-4 py-2.5 rounded-md text-sm font-bold border transition-colors ${
+                  (mustIncludeMap[activeClip.id] ?? false)
+                    ? "bg-amber-50 text-amber-700 border-amber-300"
+                    : "bg-white text-zinc-400 border-zinc-200 hover:text-amber-600"
+                }`}
+              >
+                &#9733; Must Include
+              </button>
+              <button
+                onClick={() => setAsThumbnail(activeClip.id)}
+                className="px-4 py-2.5 rounded-md text-sm font-bold border bg-white text-zinc-400 border-zinc-200 hover:text-blue-600 transition-colors"
+              >
+                📷 Thumbnail
+              </button>
+              <button
+                onClick={() => {
+                  setRemoveTarget({ id: activeClip.id, label: `${activeClip.type === "CLIP" ? "SCENE" : activeClip.clipScore?.clipType ?? "Clip"} at ${((activeClip.startTimeMs ?? 0) / 1000).toFixed(1)}s` });
+                }}
+                className="px-4 py-2.5 rounded-md text-sm font-bold border bg-white text-zinc-400 border-zinc-200 hover:text-red-600 hover:border-red-300 transition-colors"
+              >
+                🗑 Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Remove Clip Confirmation ── */}
+      {removeTarget && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setRemoveTarget(null)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
+            <h2 className="text-lg font-semibold text-zinc-900 mb-2">Remove Clip?</h2>
+            <p className="text-sm text-zinc-600 mb-1">
+              Remove <strong className="text-zinc-900">{removeTarget.label}</strong> from this event?
+            </p>
+            <p className="text-xs text-zinc-400 mb-4">This cannot be undone.</p>
+            {removeLoading ? (
+              <p className="text-sm text-zinc-500 mb-2">Removing...</p>
+            ) : (
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={() => setRemoveTarget(null)}
+                  className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleRemoveClip}
+                  disabled={removeLoading}
+                  className="text-sm px-4 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
+                >
+                  Remove
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -131,7 +131,7 @@ export async function analyzeAndSegment(
     .filter((w) => w.interestingnessScore >= 25)
     .sort((a, b) => a.startTime - b.startTime);
 
-  // Merge adjacent windows within 2s
+  // Merge adjacent windows within 0.2s (overlapping or nearly-touching only)
   const mergedWindows: typeof scoredWindows = [];
   for (const w of scoredWindows) {
     if (mergedWindows.length === 0) {
@@ -139,7 +139,7 @@ export async function analyzeAndSegment(
       continue;
     }
     const last = mergedWindows[mergedWindows.length - 1];
-    if (w.startTime - last.endTime < 2) {
+    if (w.startTime - last.endTime < 0.2) {
       last.endTime = w.endTime;
       last.interestingnessScore = Math.max(last.interestingnessScore, w.interestingnessScore);
     } else {

@@ -90,6 +90,7 @@ model ClipScore {
   professionalScore Float?    @map("professionalscore")
   momentScore       Float?    @map("momentscore")
   productionScore   Float?    @map("productionscore")
+  scoreExplanation  String?
   asset             Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@map("clip_scores")

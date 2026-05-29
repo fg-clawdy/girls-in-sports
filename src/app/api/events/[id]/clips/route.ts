@@ -42,12 +42,35 @@ export async function GET(
         endTimeMs: true,
         heightPx: true,
         widthPx: true,
-        clipScore: true,
-        assetTags: true,
+        clipScore: {
+          select: {
+            id: true,
+            compositeScore: true,
+            momentScore: true,
+            productionScore: true,
+            clipType: true,
+            visionScore: true,
+            audioScore: true,
+            motionScore: true,
+            transcriptExcerpt: true,
+            hasFaces: true,
+            hasCoachSpeech: true,
+            hasActionKeyword: true,
+            hasCrowdRoar: true,
+            scoreExplanation: true,
+          },
+        },
+        assetTags: {
+          select: { tag: true, source: true, confidence: true },
+        },
+        // Fetch parent's immichAssetId for video playback
+        parentAsset: {
+          select: { immichAssetId: true },
+        },
       },
     });
 
-    // Enrich each clip with tiered combined score and pass/fail
+    // Enrich each clip with tiered combined score, pass/fail, and parent's immichAssetId
     const enrichedClips = clips.map((clip) => {
       const { combined, passes } = computeTieredScore(
         clip.clipScore?.momentScore,
@@ -58,6 +81,9 @@ export async function GET(
         ...clip,
         tieredScore: combined,
         tieredPasses: passes,
+        // For CLIP-type assets, the video source is the parent's immichAssetId
+        // For SOURCE_VIDEO typed assets, use its own immichAssetId
+        parentImmichAssetId: clip.type === "CLIP" ? clip.parentAsset?.immichAssetId ?? null : clip.immichAssetId,
       };
     });
 
