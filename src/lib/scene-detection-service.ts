@@ -195,6 +195,16 @@ async function createChildClipAsset(opts: {
   motionLevel: "LOW" | "MEDIUM" | "HIGH";
   dominantMode: "ACTION" | "SPEECH" | "MIXED" | "MONTAGE";
 }) {
+  const existing = await prisma.asset.findFirst({
+    where: {
+      parentAssetId: opts.parentAssetId,
+      type: "CLIP",
+      startTimeMs: { gte: opts.startTimeMs - 1000, lte: opts.startTimeMs + 1000 },
+      endTimeMs: { gte: opts.endTimeMs - 1000, lte: opts.endTimeMs + 1000 },
+    },
+  });
+  if (existing) return;
+
   await prisma.asset.create({
     data: {
       eventId: opts.eventId,

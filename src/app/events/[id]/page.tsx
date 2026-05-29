@@ -358,6 +358,58 @@ export default function EventPage() {
   const [removeTarget, setRemoveTarget] = useState<{ id: string; label: string } | null>(null);
   const [removeLoading, setRemoveLoading] = useState(false);
 
+  // ── Duplicate Detection ──
+  const [showDuplicatesModal, setShowDuplicatesModal] = useState(false);
+  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
+  const [duplicateGroups, setDuplicateGroups] = useState<{
+    exactDuplicates: any[];
+    overlappingSegments: any[];
+  }>({ exactDuplicates: [], overlappingSegments: [] });
+  const [selectedForDeletion, setSelectedForDeletion] = useState<Set<string>>(new Set());
+  const [deletingDuplicates, setDeletingDuplicates] = useState(false);
+  const [dupError, setDupError] = useState("");
+
+  const openDuplicatesModal = async () => {
+    setShowDuplicatesModal(true);
+    setDuplicatesLoading(true);
+    setDupError("");
+    setSelectedForDeletion(new Set());
+    try {
+      const res = await fetch(`/api/events/${eventId}/clips/find-duplicates`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to find duplicates");
+      setDuplicateGroups(data);
+      const autoDelete = new Set<string>();
+      for (const group of data.exactDuplicates) {
+        for (const clip of group.clips) {
+          if (clip.id !== group.keepId) autoDelete.add(clip.id);
+        }
+      }
+      setSelectedForDeletion(autoDelete);
+    } catch (err: any) {
+      setDupError(err.message);
+    } finally {
+      setDuplicatesLoading(false);
+    }
+  };
+
+  const handleDeleteSelectedDuplicates = async () => {
+    if (selectedForDeletion.size === 0) return;
+    setDeletingDuplicates(true);
+    let failed = 0;
+    for (const clipId of selectedForDeletion) {
+      try {
+        await fetch(`/api/events/${eventId}/assets/${clipId}`, { method: "DELETE" });
+      } catch {
+        failed++;
+      }
+    }
+    setDeletingDuplicates(false);
+    setShowDuplicatesModal(false);
+    setSelectedForDeletion(new Set());
+    await fetchClips();
+  };
+
   const openClipViewer = (clip: ClipData) => {
     setActiveClip(clip);
   };
@@ -1105,6 +1157,12 @@ export default function EventPage() {
                 >
                   Accept All
                 </button>
+                <button
+                  onClick={openDuplicatesModal}
+                  className="px-3 py-1.5 rounded-md text-sm font-medium bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
+                >
+                  Find Duplicates
+                </button>
               </div>
 
               {clipsLoading ? (
@@ -1776,6 +1834,134 @@ export default function EventPage() {
         </div>
       )}
 
+      {/* ── Find Duplicates Modal ── */}
+      {showDuplicatesModal && (
+        <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto py-8">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowDuplicatesModal(false)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4 mb-8">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200">
+              <h2 className="text-lg font-semibold text-zinc-900">Find Duplicates</h2>
+              <button onClick={() => setShowDuplicatesModal(false)} className="text-zinc-400 hover:text-zinc-600">
+                <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-6 py-4">
+              {duplicatesLoading ? (
+                <p className="text-sm text-zinc-500 py-8 text-center">Scanning for duplicates...</p>
+              ) : dupError ? (
+                <p className="text-sm text-red-600 py-4">{dupError}</p>
+              ) : (
+                <>
+                  {duplicateGroups.exactDuplicates.length === 0 && duplicateGroups.overlappingSegments.length === 0 && (
+                    <p className="text-sm text-zinc-500 py-8 text-center">No duplicates or overlapping segments found.</p>
+                  )}
+
+                  {duplicateGroups.exactDuplicates.length > 0 && (
+                    <div className="mb-6">
+                      <h3 className="text-sm font-semibold text-zinc-800 mb-3">
+                        Exact Duplicates — {duplicateGroups.exactDuplicates.length} group{duplicateGroups.exactDuplicates.length !== 1 ? "s" : ""}
+                      </h3>
+                      <p className="text-xs text-zinc-500 mb-3">Auto-selected for deletion (highest-scored kept). Uncheck any you want to keep.</p>
+                      <div className="space-y-3 max-h-[40vh] overflow-y-auto">
+                        {duplicateGroups.exactDuplicates.map((group, gi) => (
+                          <div key={gi} className="rounded-lg border border-zinc-200 p-3">
+                            <p className="text-xs text-zinc-500 mb-2">
+                              {group.clips[0]?.startTimeMs != null
+                                ? `${(group.clips[0].startTimeMs / 1000).toFixed(1)}s – ${(group.clips[0].endTimeMs / 1000).toFixed(1)}s`
+                                : "Unknown timing"}
+                            </p>
+                            <div className="space-y-2">
+                              {group.clips.map((clip: any) => (
+                                <div key={clip.id} className="flex items-center gap-3">
+                                  <input
+                                    type="checkbox"
+                                    checked={!selectedForDeletion.has(clip.id)}
+                                    onChange={(e) => {
+                                      setSelectedForDeletion((prev) => {
+                                        const next = new Set(prev);
+                                        if (e.target.checked) next.delete(clip.id);
+                                        else next.add(clip.id);
+                                        return next;
+                                      });
+                                    }}
+                                    className="w-4 h-4 accent-emerald-600"
+                                  />
+                                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${clip.id === group.keepId ? "bg-emerald-100 text-emerald-700" : "bg-zinc-100 text-zinc-600"}`}>
+                                    {clip.id === group.keepId ? "Keep" : "Delete"}
+                                  </span>
+                                  <span className="text-xs text-zinc-600 flex-1">
+                                    {clip.clipType ?? "Clip"} · {clip.tieredScore?.toFixed(1) ?? "?"} score
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {duplicateGroups.overlappingSegments.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-zinc-800 mb-3">
+                        Overlapping Segments — {duplicateGroups.overlappingSegments.length} group{duplicateGroups.overlappingSegments.length !== 1 ? "s" : ""}
+                      </h3>
+                      <p className="text-xs text-zinc-500 mb-3">These clips overlap by &gt;30% but have different boundaries. Review and accept/reject individually.</p>
+                      <div className="space-y-3 max-h-[40vh] overflow-y-auto">
+                        {duplicateGroups.overlappingSegments.map((group: any, gi: number) => (
+                          <div key={gi} className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                            <div className="grid grid-cols-2 gap-3">
+                              {group.clips.map((clip: any) => (
+                                <div key={clip.id} className="bg-white rounded border border-amber-200 p-2">
+                                  <p className="text-xs text-zinc-500 mb-1">
+                                    {clip.startTimeMs != null
+                                      ? `${(clip.startTimeMs / 1000).toFixed(1)}s – ${(clip.endTimeMs / 1000).toFixed(1)}s`
+                                      : "—"}
+                                    {" · "}
+                                    {clip.durationSeconds != null ? `${clip.durationSeconds.toFixed(1)}s` : "—"}
+                                  </p>
+                                  <p className="text-xs font-medium text-zinc-700">
+                                    {clip.clipType ?? "Clip"} · {clip.tieredScore?.toFixed(1) ?? "?"} score
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            {duplicateGroups.exactDuplicates.length > 0 && (
+              <div className="px-6 py-4 border-t border-zinc-200 flex items-center justify-between gap-4">
+                <p className="text-xs text-zinc-500">
+                  {selectedForDeletion.size} clip{selectedForDeletion.size !== 1 ? "s" : ""} selected for deletion
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowDuplicatesModal(false)}
+                    className="px-4 py-2 rounded-md text-sm text-zinc-700 hover:bg-zinc-100 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleDeleteSelectedDuplicates}
+                    disabled={deletingDuplicates || selectedForDeletion.size === 0}
+                    className="px-4 py-2 rounded-md text-sm font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                  >
+                    {deletingDuplicates ? "Deleting..." : `Delete ${selectedForDeletion.size} Clip${selectedForDeletion.size !== 1 ? "s" : ""}`}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Remove Clip Confirmation ── */}
       {removeTarget && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center">
@@ -1786,25 +1972,21 @@ export default function EventPage() {
               Remove <strong className="text-zinc-900">{removeTarget.label}</strong> from this event?
             </p>
             <p className="text-xs text-zinc-400 mb-4">This cannot be undone.</p>
-            {removeLoading ? (
-              <p className="text-sm text-zinc-500 mb-2">Removing...</p>
-            ) : (
-              <div className="flex items-center justify-end gap-3">
-                <button
-                  onClick={() => setRemoveTarget(null)}
-                  className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleRemoveClip}
-                  disabled={removeLoading}
-                  className="text-sm px-4 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
-                >
-                  Remove
-                </button>
-              </div>
-            )}
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={() => setRemoveTarget(null)}
+                className="text-sm px-4 py-2 rounded-md text-zinc-700 hover:bg-zinc-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRemoveClip}
+                disabled={removeLoading}
+                className="text-sm px-4 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
+                {removeLoading ? "Removing..." : "Remove"}
+              </button>
+            </div>
           </div>
         </div>
       )}
