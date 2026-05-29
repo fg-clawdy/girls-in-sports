@@ -457,6 +457,27 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
       },
     });
 
+    // US-002: Generate natural-language score explanation via LLM (10s timeout, skip on error)
+    const scoreExplanation = await generateScoreExplanation({
+      visionScore: Math.round(productionScore),
+      audioScore: Math.round(audioScore),
+      motionScore: Math.round(motionScore),
+      compositeScore: finalComposite,
+      hasFaces,
+      hasCoachSpeech,
+      hasActionKeyword: keywordHits.some((k) =>
+        ["shoot", "shot", "goal", "score", "spike", "block", "save", "tackle"].includes(k)
+      ),
+      hasCrowdRoar,
+      transcriptExcerpt: transcript.slice(0, 200),
+    });
+    if (scoreExplanation) {
+      await prisma.clipScore.update({
+        where: { assetId },
+        data: { scoreExplanation },
+      });
+    }
+
     // ── 10. Update Asset status ──
     await prisma.asset.update({
       where: { id: assetId },
@@ -574,6 +595,68 @@ export async function handleScoreClip(args: { payload: unknown; jobId: string })
     } catch {
       // ignore
     }
+  }
+}
+
+// US-002: Natural-language score explanation via Venice LLM (10s timeout, nullable)
+async function generateScoreExplanation(opts: {
+  visionScore: number;
+  audioScore: number;
+  motionScore: number;
+  compositeScore: number;
+  hasFaces: boolean;
+  hasCoachSpeech: boolean;
+  hasActionKeyword: boolean;
+  hasCrowdRoar: boolean;
+  transcriptExcerpt: string;
+}): Promise<string | null> {
+  if (!VENICE_API_KEY) return null;
+
+  const prompt = `Based on this clip's analysis:
+- Vision Score: ${opts.visionScore}/100
+- Audio Score: ${opts.audioScore}/100
+- Motion Score: ${opts.motionScore}/100
+- Composite Score: ${opts.compositeScore}/100
+- Has Faces: ${opts.hasFaces}
+- Has Coach Speech: ${opts.hasCoachSpeech}
+- Has Action Keyword: ${opts.hasActionKeyword}
+- Has Crowd Roar: ${opts.hasCrowdRoar}
+- Transcript excerpt: ${opts.transcriptExcerpt || "(none)"}
+
+Explain in 1-2 sentences why this clip scored ${opts.compositeScore}/100 and what its strengths and weaknesses are. Be concise.`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const res = await fetch(`${VENICE_API_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${VENICE_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 128,
+        temperature: 0.3,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.warn(`[US-002] Score explanation API error ${res.status}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const text: string = data.choices?.[0]?.message?.content ?? "";
+    return text.trim().slice(0, 500) || null;
+  } catch (err) {
+    clearTimeout(timeout);
+    console.warn(`[US-002] Score explanation generation failed:`, err instanceof Error ? err.message : err);
+    return null;
   }
 }
 
